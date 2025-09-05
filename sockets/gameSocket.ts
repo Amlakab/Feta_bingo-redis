@@ -1,6 +1,9 @@
-import { Server, Socket } from "socket.io";
-import User from "../models/User"; // User wallet still in Mongo
-import { GameSessionRepo, GameSessionDTO, SessionStatus } from "../repos/GameSessionRepo";
+// =============================
+// File: src/socket/setupSocket.ts (refactored for Redis sessions)
+// =============================
+import { Server, Socket } from 'socket.io';
+import User from '../models/User'; // keep using Mongo for users & wallet
+import { GameSessionRepo, GameSessionDTO, SessionStatus } from '../repositories/redisGameSessionRepo';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
