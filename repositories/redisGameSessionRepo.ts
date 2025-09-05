@@ -56,7 +56,7 @@ export const GameSessionRepo = {
     return session;
   },
 
-  async find(filter: { betAmountIn?: number[]; betAmount?: number; statusIn?: SessionStatus[] }) {
+  async find(filter: { betAmountIn?: number[]; betAmount?: number; userId?: string; statusIn?: SessionStatus[] }) {
     await ensureRedis();
 
     let ids: string[] = [];
@@ -123,7 +123,7 @@ export const GameSessionRepo = {
     }
   },
 
-  async deleteMany(filter: { betAmount?: number }) {
+  async deleteMany(filter: { betAmount?: number; userId?: string }) {
     const items = await this.find({ betAmount: filter.betAmount });
     for (const s of items) {
       await deindexSession(s);
