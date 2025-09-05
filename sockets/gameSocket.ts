@@ -148,7 +148,7 @@ export function setupSocket(io: Server) {
         const { cardNumber, betAmount } = data;
         if (!socket.userId) { socket.emit('error', { message: 'Unauthorized' }); return; }
 
-        const session = await GameSessionRepo.findOne({ cardNumber, betAmount, userId: socket.userId, statusIn: ['active'] });
+        const session = await GameSessionRepo.findOne({ cardNumber, betAmount, userId: socket.userId });
         if (!session) { socket.emit('error', { message: 'Session not found' }); return; }
 
         const user = await User.findById(socket.userId);
