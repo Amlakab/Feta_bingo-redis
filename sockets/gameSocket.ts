@@ -55,7 +55,7 @@ function shuffleNumbers(numbers: string[]): string[] {
 function startGameCalling(io: Server, betAmount: number) {
   if (activeGames.has(betAmount)) {
     const game = activeGames.get(betAmount)!;
-    if (game.isCalling) return;
+    if (game.isCalling) return; // Already running
   }
 
   const allNumbers = generateAllBingoNumbers();
@@ -86,14 +86,16 @@ function startGameCalling(io: Server, betAmount: number) {
       calledNumbers: game.calledNumbers,
     });
 
-    if (game.remainingNumbers.length === 0) stopGameCalling(betAmount);
+    if (game.remainingNumbers.length === 0) {
+      stopGameCalling(betAmount);
+    }
   }, 4000);
 }
 
 // Stop game
 function stopGameCalling(betAmount: number) {
   const game = activeGames.get(betAmount);
-  if (game?.callingInterval) {
+  if (game && game.callingInterval) {
     clearInterval(game.callingInterval);
     game.isCalling = false;
   }
@@ -111,9 +113,10 @@ export function setupSocket(io: Server) {
       const token = socket.handshake.auth.token || socket.handshake.query.token;
       if (!token) return next(new Error("Authentication error"));
 
+      // For now, use query userId
       socket.userId = socket.handshake.query.userId as string;
       next();
-    } catch {
+    } catch (error) {
       next(new Error("Authentication error"));
     }
   });
@@ -121,21 +124,24 @@ export function setupSocket(io: Server) {
   io.on("connection", (socket: AuthenticatedSocket) => {
     console.log("Client connected:", socket.id, "User:", socket.userId);
 
-    // ------------------ GET SESSIONS ------------------
-    socket.on("get-sessions", async (data: { betOptions?: number[]; betAmount?: number }) => {
-      try {
-        const sessions = await GameSessionRepo.find({
-          betAmountIn: data.betOptions,
-          betAmount: data.betAmount,
-          statusIn: ["active", "playing", "blocked"],
-        });
-        socket.emit("sessions-updated", sessions);
-      } catch (error: any) {
-        socket.emit("error", { message: error.message || "Failed to get sessions" });
+    // Get sessions
+    socket.on(
+      "get-sessions",
+      async (data: { betOptions?: number[]; betAmount?: number }) => {
+        try {
+          const sessions = await GameSessionRepo.find({
+            betAmountIn: data.betOptions,
+            betAmount: data.betAmount,
+            statusIn: ["active", "playing", "blocked"],
+          });
+          socket.emit("sessions-updated", sessions);
+        } catch (error: any) {
+          socket.emit("error", { message: error.message || "Failed to get sessions" });
+        }
       }
-    });
+    );
 
-    // ------------------ CREATE SESSION ------------------
+    // Create session
     socket.on(
       "create-session",
       async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
@@ -145,10 +151,12 @@ export function setupSocket(io: Server) {
             return;
           }
 
+          // Check if card already taken
           const existing = await GameSessionRepo.findOne({
             cardNumber: data.cardNumber,
             betAmount: data.betAmount,
             statusIn: ["active", "playing"],
+            userId: undefined,
           });
           if (existing) {
             socket.emit("error", { message: "Card already taken" });
@@ -156,8 +164,14 @@ export function setupSocket(io: Server) {
           }
 
           const user = await User.findById(socket.userId);
-          if (!user) throw new Error("User not found");
-          if (user.wallet < data.betAmount) throw new Error("Insufficient balance");
+          if (!user) {
+            socket.emit("error", { message: "User not found" });
+            return;
+          }
+          if (user.wallet < data.betAmount) {
+            socket.emit("error", { message: "Insufficient balance" });
+            return;
+          }
 
           user.wallet -= data.betAmount;
           await user.save();
@@ -169,7 +183,10 @@ export function setupSocket(io: Server) {
             createdAt: data.createdAt,
           });
 
-          const allSessions = await GameSessionRepo.find({ statusIn: ["active", "playing"] });
+          const allSessions = await GameSessionRepo.find({
+            statusIn: ["active", "playing"],
+          });
+
           io.emit("session-created", session);
           io.emit("sessions-updated", allSessions);
         } catch (error: any) {
@@ -178,15 +195,24 @@ export function setupSocket(io: Server) {
       }
     );
 
-    // ------------------ REFUND WALLET ------------------
+    // Refund wallet
     socket.on("refund-wallet", async (data: { betAmount: number }) => {
       try {
-        if (!socket.userId) throw new Error("Unauthorized");
+        if (!socket.userId) {
+          socket.emit("error", { message: "Unauthorized" });
+          return;
+        }
 
-        const sessions = await GameSessionRepo.find({ betAmount: data.betAmount });
+        const sessions = await GameSessionRepo.find({
+          betAmount: data.betAmount,
+          statusIn: undefined,
+        });
         const userSessions = sessions.filter((s) => s.userId === socket.userId);
 
-        if (!userSessions.length) throw new Error("No sessions found");
+        if (!userSessions.length) {
+          socket.emit("error", { message: "No sessions found" });
+          return;
+        }
 
         const totalRefund = data.betAmount * userSessions.length;
         const user = await User.findById(socket.userId);
@@ -202,17 +228,22 @@ export function setupSocket(io: Server) {
 
         socket.emit("wallet-updated", user?.wallet || 0);
 
-        const updatedSessions = await GameSessionRepo.find({ statusIn: ["active", "playing"] });
+        const updatedSessions = await GameSessionRepo.find({
+          statusIn: ["active", "playing"],
+        });
         io.emit("sessions-updated", updatedSessions);
       } catch (error: any) {
         socket.emit("error", { message: error.message || "Failed to refund wallet" });
       }
     });
 
-    // ------------------ DELETE SESSION ------------------
+    // Delete session
     socket.on("delete-session", async (data: { cardNumber: number; betAmount: number }) => {
       try {
-        if (!socket.userId) throw new Error("Unauthorized");
+        if (!socket.userId) {
+          socket.emit("error", { message: "Unauthorized" });
+          return;
+        }
 
         const session = await GameSessionRepo.findOne({
           cardNumber: data.cardNumber,
@@ -220,7 +251,10 @@ export function setupSocket(io: Server) {
           userId: socket.userId,
           statusIn: ["active"],
         });
-        if (!session) throw new Error("Session not found");
+        if (!session) {
+          socket.emit("error", { message: "Session not found" });
+          return;
+        }
 
         const user = await User.findById(socket.userId);
         if (user) {
@@ -230,7 +264,10 @@ export function setupSocket(io: Server) {
 
         await GameSessionRepo.deleteById(session._id);
 
-        const updatedSessions = await GameSessionRepo.find({ statusIn: ["active", "playing"] });
+        const updatedSessions = await GameSessionRepo.find({
+          statusIn: ["active", "playing"],
+        });
+
         socket.emit("wallet-updated", user?.wallet || 0);
         io.emit("sessions-updated", updatedSessions);
       } catch (error: any) {
@@ -238,7 +275,7 @@ export function setupSocket(io: Server) {
       }
     });
 
-    // ------------------ UPDATE SESSION STATUS ------------------
+    // Update session status
     socket.on(
       "update-session-status",
       async (data: { cardNumber: number; betAmount: number; status: SessionStatus }) => {
@@ -247,7 +284,10 @@ export function setupSocket(io: Server) {
             { cardNumber: data.cardNumber, betAmount: data.betAmount },
             { status: data.status }
           );
-          const updatedSessions = await GameSessionRepo.find({ statusIn: ["active", "playing"] });
+
+          const updatedSessions = await GameSessionRepo.find({
+            statusIn: ["active", "playing"],
+          });
           io.emit("sessions-updated", updatedSessions);
         } catch (error: any) {
           socket.emit("error", { message: error.message || "Failed to update session" });
@@ -255,69 +295,108 @@ export function setupSocket(io: Server) {
       }
     );
 
-    // ------------------ UPDATE SESSION STATUS BY BET ------------------
+    // Update session status by bet
     socket.on(
       "update-session-status-by-bet",
       async (data: { betAmount: number; status: SessionStatus }) => {
         try {
-          await GameSessionRepo.updateMany({ betAmount: data.betAmount, status: "active" }, { status: data.status });
+          await GameSessionRepo.updateMany(
+            { betAmount: data.betAmount, status: "active" },
+            { status: data.status }
+          );
+
           const updatedSessions = await GameSessionRepo.find({
             betAmount: data.betAmount,
             statusIn: ["active", "playing"],
           });
           io.emit("sessions-updated", updatedSessions);
         } catch (error: any) {
-          socket.emit("error", { message: error.message || "Failed to update sessions by bet" });
+          socket.emit("error", { message: error.message || "Failed to update sessions by bet amount" });
         }
       }
     );
 
-    // ------------------ GAME CONTROL ------------------
-    const emitGameState = (betAmount: number, socket?: AuthenticatedSocket) => {
-      const game = getGameState(betAmount);
-      if (game) {
-        (socket || io).emit("game-state", {
-          betAmount,
-          calledNumbers: game.calledNumbers,
-          currentNumber: game.calledNumbers[game.calledNumbers.length - 1] || "",
-        });
-      }
-    };
-
+    // Start game
     socket.on("start-game", (data: { betAmount: number }) => {
-      startGameCalling(io, data.betAmount);
-      emitGameState(data.betAmount, socket);
+      try {
+        startGameCalling(io, data.betAmount);
+        const gameState = getGameState(data.betAmount);
+        if (gameState) {
+          socket.emit("game-state", {
+            betAmount: data.betAmount,
+            calledNumbers: gameState.calledNumbers,
+            currentNumber: gameState.calledNumbers[gameState.calledNumbers.length - 1] || "",
+          });
+        }
+      } catch (error: any) {
+        socket.emit("error", { message: error.message || "Failed to start game" });
+      }
     });
 
+    // Get game state
     socket.on("get-game-state", (data: { betAmount: number }) => {
-      emitGameState(data.betAmount, socket);
+      try {
+        const gameState = getGameState(data.betAmount);
+        if (gameState) {
+          socket.emit("game-state", {
+            betAmount: data.betAmount,
+            calledNumbers: gameState.calledNumbers,
+            currentNumber: gameState.calledNumbers[gameState.calledNumbers.length - 1] || "",
+          });
+        }
+      } catch (error: any) {
+        socket.emit("error", { message: error.message || "Failed to get game state" });
+      }
     });
 
+    // Stop game
     socket.on("stop-game", (data: { betAmount: number }) => {
-      stopGameCalling(data.betAmount);
-      activeGames.delete(data.betAmount);
-      io.emit("game-stopped", { betAmount: data.betAmount });
+      try {
+        stopGameCalling(data.betAmount);
+        activeGames.delete(data.betAmount);
+        io.emit("game-stopped", { betAmount: data.betAmount });
+      } catch (error: any) {
+        socket.emit("error", { message: error.message || "Failed to stop game" });
+      }
     });
 
+    // End game
     socket.on(
       "end-game",
       async (data: { betAmount: number; winnerId: string; winnerCard: number; prizePool: number }) => {
-        stopGameCalling(data.betAmount);
-        activeGames.delete(data.betAmount);
-        await GameSessionRepo.deleteMany({ betAmount: data.betAmount });
-        io.emit("game-ended", data);
-        io.emit("sessions-updated", []);
+        try {
+          stopGameCalling(data.betAmount);
+          activeGames.delete(data.betAmount);
+
+          await GameSessionRepo.deleteMany({ betAmount: data.betAmount });
+
+          io.emit("game-ended", data);
+          io.emit("sessions-updated", []);
+        } catch (error: any) {
+          socket.emit("error", { message: error.message || "Failed to end game" });
+        }
       }
     );
 
+    // Reset game
     socket.on("reset-game", async (data: { betAmount: number }) => {
-      stopGameCalling(data.betAmount);
-      activeGames.delete(data.betAmount);
-      await GameSessionRepo.deleteMany({ betAmount: data.betAmount });
+      try {
+        stopGameCalling(data.betAmount);
+        activeGames.delete(data.betAmount);
+
+        await GameSessionRepo.deleteMany({ betAmount: data.betAmount });
+      } catch (error: any) {
+        socket.emit("error", { message: error.message || "Failed to reset game" });
+      }
     });
 
-    socket.on("disconnect", (reason) => console.log("Client disconnected:", socket.id, reason));
-    socket.on("error", (error) => console.error("Socket error:", error));
+    socket.on("disconnect", (reason) => {
+      console.log("Client disconnected:", socket.id, "Reason:", reason);
+    });
+
+    socket.on("error", (error) => {
+      console.error("Socket error:", error);
+    });
   });
 
   console.log("Socket.io server setup complete");
