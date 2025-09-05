@@ -1,49 +1,45 @@
-// =============================
-// File: src/repositories/redisGameSessionRepo.ts
-// =============================
-import { redis, ensureRedis } from "../lib/redisClient";
+import redisClient, { ensureRedis } from "../lib/redisClient";
 import { randomUUID } from "crypto";
 
 export type SessionStatus = "active" | "playing" | "blocked" | "completed";
 
 export interface GameSessionDTO {
-  _id: string;                 // generated UUID
-  userId: string;              // Mongo ObjectId string
+  _id: string;
+  userId: string;
   cardNumber: number;
   betAmount: number;
   status: SessionStatus;
-  createdAt: string;           // ISO string
+  createdAt: string;
 }
 
 // Keys & indexes
-const ALL_SESSIONS_SET = "sessions:all";                 // Set of session IDs
-const SESSION_KEY = (id: string) => `session:${id}`;      // JSON value
-const BET_SET = (bet: number) => `sessions:bet:${bet}`;   // Set of session IDs by betAmount
-const STATUS_SET = (s: SessionStatus) => `sessions:status:${s}`; // Set of session IDs by status
+const ALL_SESSIONS_SET = "sessions:all";
+const SESSION_KEY = (id: string) => `session:${id}`;
+const BET_SET = (bet: number) => `sessions:bet:${bet}`;
+const STATUS_SET = (s: SessionStatus) => `sessions:status:${s}`;
 
 async function indexSession(session: GameSessionDTO) {
-  await redis.sAdd(ALL_SESSIONS_SET, session._id);
-  await redis.sAdd(BET_SET(session.betAmount), session._id);
-  await redis.sAdd(STATUS_SET(session.status), session._id);
+  await redisClient.sAdd(ALL_SESSIONS_SET, session._id);
+  await redisClient.sAdd(BET_SET(session.betAmount), session._id);
+  await redisClient.sAdd(STATUS_SET(session.status), session._id);
 }
 
 async function deindexSession(session: GameSessionDTO) {
-  await redis.sRem(ALL_SESSIONS_SET, session._id);
-  await redis.sRem(BET_SET(session.betAmount), session._id);
-  await redis.sRem(STATUS_SET(session.status), session._id);
+  await redisClient.sRem(ALL_SESSIONS_SET, session._id);
+  await redisClient.sRem(BET_SET(session.betAmount), session._id);
+  await redisClient.sRem(STATUS_SET(session.status), session._id);
 }
 
 async function readSession(id: string): Promise<GameSessionDTO | null> {
-  const raw = await redis.get(SESSION_KEY(id));
+  const raw = await redisClient.get(SESSION_KEY(id));
   return raw ? (JSON.parse(raw) as GameSessionDTO) : null;
 }
 
 async function writeSession(session: GameSessionDTO) {
-  await redis.set(SESSION_KEY(session._id), JSON.stringify(session));
+  await redisClient.set(SESSION_KEY(session._id), JSON.stringify(session));
 }
 
 export const GameSessionRepo = {
-  // Create
   async create(data: Omit<GameSessionDTO, "_id" | "createdAt" | "status"> & { status?: SessionStatus; createdAt?: string }) {
     await ensureRedis();
     const now = new Date().toISOString();
@@ -60,35 +56,25 @@ export const GameSessionRepo = {
     return session;
   },
 
-  // Find with simple filters
   async find(filter: { betAmountIn?: number[]; betAmount?: number; statusIn?: SessionStatus[] }) {
     await ensureRedis();
 
     let ids: string[] = [];
-
     if (filter.betAmount !== undefined) {
-      ids = await redis.sMembers(BET_SET(filter.betAmount));
+      ids = await redisClient.sMembers(BET_SET(filter.betAmount));
     } else if (filter.betAmountIn && filter.betAmountIn.length) {
-      const memberSets = await Promise.all(filter.betAmountIn.map((b) => redis.sMembers(BET_SET(b))));
+      const memberSets = await Promise.all(filter.betAmountIn.map((b) => redisClient.sMembers(BET_SET(b))));
       ids = Array.from(new Set(memberSets.flat()));
     } else {
-      ids = await redis.sMembers(ALL_SESSIONS_SET);
+      ids = await redisClient.sMembers(ALL_SESSIONS_SET);
     }
 
-    // Fetch and filter in memory by status
     const sessions = (await Promise.all(ids.map(readSession))).filter(Boolean) as GameSessionDTO[];
-
-    const statusFiltered = filter.statusIn && filter.statusIn.length
+    return filter.statusIn?.length
       ? sessions.filter((s) => filter.statusIn!.includes(s.status))
       : sessions;
-
-    // Sort by createdAt ASC to mimic typical DB default (adjust if you need)
-    statusFiltered.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-    return statusFiltered;
   },
 
-  // Find one by fields
   async findOne(filter: { cardNumber?: number; betAmount?: number; userId?: string; statusIn?: SessionStatus[] }) {
     const list = await this.find({ betAmount: filter.betAmount, statusIn: filter.statusIn });
     return list.find((s) =>
@@ -107,7 +93,7 @@ export const GameSessionRepo = {
     const s = await readSession(id);
     if (!s) return;
     await deindexSession(s);
-    await redis.del(SESSION_KEY(id));
+    await redisClient.del(SESSION_KEY(id));
   },
 
   async updateOne(filter: { cardNumber?: number; betAmount?: number }, update: Partial<Pick<GameSessionDTO, "status">>) {
@@ -118,9 +104,8 @@ export const GameSessionRepo = {
     const changed = { ...target, ...update } as GameSessionDTO;
     await writeSession(changed);
     if (update.status && update.status !== originalStatus) {
-      // move index between status sets
-      await redis.sRem(STATUS_SET(originalStatus), changed._id);
-      await redis.sAdd(STATUS_SET(changed.status), changed._id);
+      await redisClient.sRem(STATUS_SET(originalStatus), changed._id);
+      await redisClient.sAdd(STATUS_SET(changed.status), changed._id);
     }
     return changed;
   },
@@ -129,11 +114,11 @@ export const GameSessionRepo = {
     const items = await this.find({ betAmount: filter.betAmount, statusIn: filter.status ? [filter.status] : undefined });
     for (const s of items) {
       const originalStatus = s.status;
-      const changed: GameSessionDTO = { ...s, ...update } as GameSessionDTO;
+      const changed: GameSessionDTO = { ...s, ...update };
       await writeSession(changed);
       if (update.status && update.status !== originalStatus) {
-        await redis.sRem(STATUS_SET(originalStatus), s._id);
-        await redis.sAdd(STATUS_SET(changed.status), s._id);
+        await redisClient.sRem(STATUS_SET(originalStatus), s._id);
+        await redisClient.sAdd(STATUS_SET(changed.status), changed._id);
       }
     }
   },
@@ -142,8 +127,7 @@ export const GameSessionRepo = {
     const items = await this.find({ betAmount: filter.betAmount });
     for (const s of items) {
       await deindexSession(s);
-      await redis.del(SESSION_KEY(s._id));
+      await redisClient.del(SESSION_KEY(s._id));
     }
   },
 };
-
