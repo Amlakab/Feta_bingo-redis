@@ -13,6 +13,7 @@ import walletRoutes from './routes/wallet';
 import adminRoutes from './routes/admin';
 import agentRoutes from './routes/agent';
 import userRoutes from './routes/user';
+import feedbackRoutes from './routes/feedback';
 import { connectDB } from './config/database';
 import { setupSocket } from './sockets/gameSocket';
 import { errorHandler } from './middleware/errorHandler';
@@ -50,6 +51,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/games', gamesRoutes);
 app.use('/api/transactions', transactionRoutes);
+app.use('/api/feedback', feedbackRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
