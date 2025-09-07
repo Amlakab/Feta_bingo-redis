@@ -36,7 +36,7 @@ const io = new Server(server, {
 
 // Middleware
 app.use(cors({
-  origin: process.env.CLIENT_URL || "https://localhost:3000",
+  origin: process.env.CLIENT_URL || "https://addis-bingo-game-client.vercel.app",
   credentials: true
 }));
 app.use(express.json());
@@ -76,5 +76,5 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket available at ${process.env.CLIENT_URL || 'http://localhost:3000'}`);
+  console.log(`WebSocket available at ${process.env.CLIENT_URL || 'https://addis-bingo-game-client.vercel.app'}`);
 });
