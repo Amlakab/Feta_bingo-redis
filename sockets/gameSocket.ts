@@ -64,7 +64,7 @@ export function setupSocket(io: Server) {
         if (userId !== socket.userId) { socket.emit('error', { message: 'Unauthorized' }); return; }
 
         // Ensure card not taken for this bet
-        const existing = await GameSessionRepo.findOne({ cardNumber, betAmount, statusIn: ['active','playing'] });
+        const existing = await GameSessionRepo.findOne({ cardNumber, betAmount, statusIn: ['ready','active','playing'] });
         if (existing) { socket.emit('error', { message: 'Card already taken' }); return; }
 
         // Wallet checks (Mongo User stays as-is)
@@ -88,6 +88,71 @@ export function setupSocket(io: Server) {
     });
 
     // === Refund Wallet ===
+
+      socket.on('clear-selected', async (data: { 
+      betAmount: number;
+      userId: string;
+    }) => {
+      try {
+        const { betAmount, userId } = data;
+
+        if (!userId) {
+          socket.emit('error', { message: 'User ID is required' });
+          return;
+        }
+
+        if (socket.userId !== userId) {
+          socket.emit('error', { message: 'Unauthorized' });
+          return;
+        }
+
+        // Find all sessions for this user and bet amount
+        const sessions = await GameSessionRepo.find({
+          betAmount,
+          userId: userId,
+          statusIn: ['active']
+        });
+
+        if (!sessions || sessions.length === 0) {
+          socket.emit('error', { message: 'No sessions found' });
+          return;
+        }
+
+        // Refund = betAmount × number of sessions
+        //const totalRefund = betAmount * sessions.length;
+
+        // Update user's wallet
+         const user = await User.findById(userId);
+        // if (user) {
+        //   (user as any).wallet += totalRefund;
+        //   await user.save();
+        // }
+
+        // Delete all sessions for this user with this bet amount
+        await GameSessionRepo.deleteMany({ 
+          betAmount, 
+          userId: userId
+        });
+
+        // Stop game logic & cleanup for this bet amount
+        stopGameCalling(betAmount);
+        activeGames.delete(betAmount);
+
+        //Send wallet update back to this user
+        socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+
+        // Broadcast updated sessions list to everyone
+        const updatedSessions = await GameSessionRepo.find({
+          statusIn: ['active','ready']
+        });
+        const enriched = await enrichWithUserPhones(updatedSessions);
+        io.emit('sessions-updated', enriched);
+
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to refund wallet' });
+      }
+    });
+
     socket.on('refund-wallet', async (data: { 
       betAmount: number;
       userId: string;
@@ -220,10 +285,10 @@ export function setupSocket(io: Server) {
         if (!session) { socket.emit('error', { message: 'Session not found' }); return; }
 
         const user = await User.findById(socket.userId);
-        if (user) { 
-          (user as any).wallet += betAmount; 
-          await user.save(); 
-        }
+        // if (user) { 
+        //   //(user as any).wallet += betAmount; 
+        //   //await user.save(); 
+        // }
 
         await GameSessionRepo.deleteById(session._id);
 
@@ -349,7 +414,7 @@ export function setupSocket(io: Server) {
       } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to stop game' }); }
     });
 
-    // Track winners temporarily per betAmount
+  // Track winners temporarily per betAmount
 const pendingWinners: Record<number, { userId: string; card: number }[]> = {};
 
 socket.on(
