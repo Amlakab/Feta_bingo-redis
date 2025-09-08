@@ -493,6 +493,16 @@ socket.on(
       } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to end game' }); }
     });
 
+    socket.on('test-game', async (data: { betAmount: number }) => {
+      try {
+        const { betAmount } = data;
+        stopGameCalling(betAmount); 
+        activeGames.delete(betAmount);
+        await GameSessionRepo.deleteMany({ betAmount });
+        // No broadcast per original code
+      } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to end game' }); }
+    });
+
     socket.on('disconnect', (reason) => { console.log('Client disconnected:', socket.id, 'Reason:', reason); });
     socket.on('error', (error) => { console.error('Socket error:', error); });
   });
