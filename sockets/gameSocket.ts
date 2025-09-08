@@ -49,7 +49,7 @@ export function setupSocket(io: Server) {
     socket.on('get-sessions', async (data: { betOptions?: number[]; betAmount?: number }) => {
       try {
         const betAmountIn = data.betOptions && data.betOptions.length ? data.betOptions : (data.betAmount !== undefined ? [data.betAmount] : undefined);
-        const sessions = await GameSessionRepo.find({ betAmountIn, statusIn: ['active','playing','blocked'] as SessionStatus[] });
+        const sessions = await GameSessionRepo.find({ betAmountIn, statusIn: ['ready','active','playing','blocked'] });
         const enriched = await enrichWithUserPhones(sessions);
         socket.emit('sessions-updated', enriched);
       } catch (error: any) {
@@ -68,16 +68,16 @@ export function setupSocket(io: Server) {
         if (existing) { socket.emit('error', { message: 'Card already taken' }); return; }
 
         // Wallet checks (Mongo User stays as-is)
-        const user = await User.findById(userId);
-        if (!user) { socket.emit('error', { message: 'User not found' }); return; }
-        if ((user as any).wallet < betAmount) { socket.emit('error', { message: 'Insufficient balance' }); return; }
-        (user as any).wallet -= betAmount; await user.save();
+        // const user = await User.findById(userId);
+        // if (!user) { socket.emit('error', { message: 'User not found' }); return; }
+        // if ((user as any).wallet < betAmount) { socket.emit('error', { message: 'Insufficient balance' }); return; }
+        // (user as any).wallet -= betAmount; await user.save();
 
         const created = await GameSessionRepo.create({ userId, cardNumber, betAmount, status: 'active', createdAt });
         const populatedCreated = (await enrichWithUserPhones([created]))[0];
 
         // Broadcast all sessions (active/playing)
-        const allSessions = await GameSessionRepo.find({ statusIn: ['active','playing'] });
+        const allSessions = await GameSessionRepo.find({ statusIn: ['ready','active','playing'] });
         const enrichedAll = await enrichWithUserPhones(allSessions);
 
         io.emit('session-created', populatedCreated);
@@ -87,60 +87,128 @@ export function setupSocket(io: Server) {
       }
     });
 
+    // === Refund Wallet ===
+    socket.on('refund-wallet', async (data: { 
+      betAmount: number;
+      userId: string;
+    }) => {
+      try {
+        const { betAmount, userId } = data;
 
-  socket.on('refund-wallet', async (data: { 
-  betAmount: number;
-}) => {
-  try {
-    const { betAmount } = data;
+        if (!userId) {
+          socket.emit('error', { message: 'User ID is required' });
+          return;
+        }
 
-    // Check authentication
-    if (!socket.userId) {
-      socket.emit('error', { message: 'Unauthorized' });
-      return;
-    }
+        if (socket.userId !== userId) {
+          socket.emit('error', { message: 'Unauthorized' });
+          return;
+        }
 
-    // Find all sessions for this user and bet amount
-    const sessions = await GameSessionRepo.find({
-      betAmount,
-      userId: socket.userId,
-    });
+        // Find all sessions for this user and bet amount
+        const sessions = await GameSessionRepo.find({
+          betAmount,
+          userId: userId,
+          statusIn: ['ready']
+        });
 
-    if (!sessions || sessions.length === 0) {
-      socket.emit('error', { message: 'No sessions found' });
-      return;
-    }
+        if (!sessions || sessions.length === 0) {
+          socket.emit('error', { message: 'No sessions found' });
+          return;
+        }
 
-    // Refund = betAmount × number of sessions
-    const totalRefund = betAmount * sessions.length;
+        // Refund = betAmount × number of sessions
+        const totalRefund = betAmount * sessions.length;
 
-    // Update user's wallet
-    const user = await User.findById(socket.userId);
-    if (user) {
-      user.wallet += totalRefund;
-      await user.save();
-    }
+        // Update user's wallet
+        const user = await User.findById(userId);
+        if (user) {
+          (user as any).wallet += totalRefund;
+          await user.save();
+        }
 
-    // Delete all sessions for this user with this bet amount
-    await GameSessionRepo.deleteMany({ betAmount, userId: socket.userId });
+        // Delete all sessions for this user with this bet amount
+        await GameSessionRepo.deleteMany({ 
+          betAmount, 
+          userId: userId
+        });
 
-    // Stop game logic & cleanup for this bet amount
-    stopGameCalling(betAmount);
-    activeGames.delete(betAmount);
+        // Stop game logic & cleanup for this bet amount
+        stopGameCalling(betAmount);
+        activeGames.delete(betAmount);
 
-    // Send wallet update back to this user
-    socket.emit('wallet-updated', user?.wallet || 0);
-
-    // Broadcast updated sessions list to everyone
-    const updated = await GameSessionRepo.find({ statusIn: ['active','playing'] });
-        const enriched = await enrichWithUserPhones(updated);
+        // Send wallet update back to this user
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+
+        // Broadcast updated sessions list to everyone
+        const updatedSessions = await GameSessionRepo.find({
+          statusIn: ['active', 'playing', 'ready']
+        });
+        const enriched = await enrichWithUserPhones(updatedSessions);
         io.emit('sessions-updated', enriched);
 
-  } catch (error: any) {
-    socket.emit('error', { message: error.message || 'Failed to refund wallet' });
-  }
-});
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to refund wallet' });
+      }
+    });
+
+    // === Fund Wallet ===
+    socket.on('fund-wallet', async (data: { 
+      betAmount: number;
+      userId: string;
+    }) => {
+      try {
+        const { betAmount, userId } = data;
+
+        if (!userId) {
+          socket.emit('error', { message: 'User ID is required' });
+          return;
+        }
+
+        if (socket.userId !== userId) {
+          socket.emit('error', { message: 'Unauthorized' });
+          return;
+        }
+
+        // Find all sessions for this user and bet amount
+        const sessions = await GameSessionRepo.find({
+          betAmount,
+          userId: userId,
+          statusIn: ['active']
+        });
+
+        if (!sessions || sessions.length === 0) {
+          socket.emit('error', { message: 'No sessions found' });
+          return;
+        }
+
+        // Calculate total amount to deduct
+        const totalAmount = betAmount * sessions.length;
+
+        // Find user and check if they have sufficient balance
+        const user = await User.findById(userId);
+        if (!user) {
+          socket.emit('error', { message: 'User not found' });
+          return;
+        }
+
+        // Check if user has sufficient balance
+        if ((user as any).wallet < totalAmount) {
+          socket.emit('error', { message: 'Insufficient balance' });
+          return;
+        }
+
+        // Subtract the amount from wallet
+        (user as any).wallet -= totalAmount;
+        await user.save();
+
+        // Send wallet update back to this user
+        socket.emit('wallet-updated', (user as any).wallet);
+
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to process wallet funding' });
+      }
+    });
 
     // === Delete user session & refund ===
     socket.on('delete-session', async (data: { cardNumber: number; betAmount: number; }) => {
@@ -159,7 +227,7 @@ export function setupSocket(io: Server) {
 
         await GameSessionRepo.deleteById(session._id);
 
-        const updated = await GameSessionRepo.find({ statusIn: ['active','playing'] });
+        const updated = await GameSessionRepo.find({ statusIn: ['ready','active','playing'] });
         const enriched = await enrichWithUserPhones(updated);
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
         io.emit('sessions-updated', enriched);
@@ -173,7 +241,7 @@ export function setupSocket(io: Server) {
       try {
         const { cardNumber, betAmount, status } = data;
         await GameSessionRepo.updateOne({ cardNumber, betAmount }, { status: status as SessionStatus });
-        const updated = await GameSessionRepo.find({ statusIn: ['active','playing'] });
+        const updated = await GameSessionRepo.find({ statusIn: ['ready','active','playing'] });
         const enriched = await enrichWithUserPhones(updated);
         io.emit('sessions-updated', enriched);
       } catch (error: any) {
@@ -185,8 +253,8 @@ export function setupSocket(io: Server) {
     socket.on('update-session-status-by-bet', async (data: { betAmount: number; status: string }) => {
       try {
         const { betAmount, status } = data;
-        await GameSessionRepo.updateMany({ betAmount, status: 'active' }, { status: status as SessionStatus });
-        const updated = await GameSessionRepo.find({ betAmount, statusIn: ['active','playing'] });
+        await GameSessionRepo.updateMany({ betAmount, status: 'ready' }, { status: status as SessionStatus });
+        const updated = await GameSessionRepo.find({ betAmount, statusIn: ['active','ready','playing'] });
         const enriched = await enrichWithUserPhones(updated);
         io.emit('sessions-updated', enriched);
       } catch (error: any) {
@@ -194,7 +262,63 @@ export function setupSocket(io: Server) {
       }
     });
 
-    // === Start/State/Stop/End/Reset game (UNCHANGED storage-wise except session deletions) ===
+    // === Update status by userId and betAmount ===
+    socket.on('update-session-status-by-user-bet', async (data: { 
+      userId: string;
+      betAmount: number; 
+      status: string 
+    }) => {
+      try {
+        const { userId, betAmount, status } = data;
+        
+        // Update session for specific user and bet amount
+        await GameSessionRepo.updateMany(
+          { userId, betAmount },
+          { status: status as SessionStatus }
+        );
+        
+        // Get updated sessions for this specific bet amount
+        const updated = await GameSessionRepo.find({ 
+          betAmount,
+          statusIn: ['ready', 'active', 'playing'] 
+        });
+        
+        const enriched = await enrichWithUserPhones(updated);
+        io.emit('sessions-updated', enriched);
+        
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update session by user and bet' });
+      }
+    });
+
+    // === Update ready sessions by bet ===
+    socket.on('update-ready-sessions-by-bet', async (data: { 
+      betAmount: number; 
+      status: string 
+    }) => {
+      try {
+        const { betAmount, status } = data;
+        
+        // Update all sessions with this bet amount AND current status = 'ready'
+        await GameSessionRepo.updateMany(
+          { betAmount, status: 'ready' },
+          { status: status as SessionStatus }
+        );
+        
+        // Get all active/playing sessions
+        const updated = await GameSessionRepo.find({ 
+          statusIn: ['active', 'playing'] 
+        });
+        
+        const enriched = await enrichWithUserPhones(updated);
+        io.emit('sessions-updated', enriched);
+        
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update ready sessions by bet amount' });
+      }
+    });
+
+    // === Start/State/Stop/End/Reset game ===
     socket.on('start-game', (data: { betAmount: number }) => {
       try {
         const { betAmount } = data;
@@ -217,24 +341,88 @@ export function setupSocket(io: Server) {
     });
 
     socket.on('stop-game', (data: { betAmount: number }) => {
-      try { const { betAmount } = data; stopGameCalling(betAmount); activeGames.delete(betAmount); io.emit('game-stopped', { betAmount }); }
-      catch (error: any) { socket.emit('error', { message: error.message || 'Failed to stop game' }); }
+      try { 
+        const { betAmount } = data; 
+        stopGameCalling(betAmount); 
+        activeGames.delete(betAmount); 
+        io.emit('game-stopped', { betAmount }); 
+      } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to stop game' }); }
     });
 
-    socket.on('end-game', async (data: { betAmount: number; winnerId: string; winnerCard: number; prizePool: number }) => {
-      try {
-        const { betAmount, winnerId, winnerCard, prizePool } = data;
-        stopGameCalling(betAmount); activeGames.delete(betAmount);
-        await GameSessionRepo.deleteMany({ betAmount });
-        io.emit('game-ended', { winnerId, winnerCard, prizePool });
-        io.emit('sessions-updated', []);
-      } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to end game' }); }
-    });
+    // Track winners temporarily per betAmount
+const pendingWinners: Record<number, { userId: string; card: number }[]> = {};
+
+socket.on(
+  'end-game',
+  async (data: { betAmount: number; winnerId: string; winnerCard: number; prizePool: number }) => {
+    try {
+      const { betAmount, winnerId, winnerCard, prizePool } = data;
+
+      // Store winners temporarily for this betAmount
+      if (!pendingWinners[betAmount]) {
+        pendingWinners[betAmount] = [];
+      }
+      pendingWinners[betAmount].push({ userId: winnerId, card: winnerCard });
+
+      // If this is the first winner for this betAmount, start 4-second timer
+      if (pendingWinners[betAmount].length === 1) {
+        stopGameCalling(betAmount);
+
+        setTimeout(async () => {
+          try {
+            const winners = pendingWinners[betAmount] || [];
+            delete pendingWinners[betAmount]; // cleanup
+
+            activeGames.delete(betAmount);
+            await GameSessionRepo.deleteMany({ betAmount });
+
+            if (winners.length === 0) return;
+
+            const prizePerWinner = prizePool / winners.length;
+
+            // Update each winner's wallet
+            for (const w of winners) {
+              const user = await User.findById(w.userId);
+              if (user) {
+                (user as any).wallet += prizePerWinner;
+                await user.save();
+
+                // Send private notification to the winner
+                io.to(w.userId).emit('winner-notification', {
+                  message: `🎉 You won! There were ${winners.length} winners. Your prize: ${prizePerWinner}`,
+                  prize: prizePerWinner,
+                  totalWinners: winners.length,
+                  card: w.card,
+                });
+              }
+            }
+
+            // Broadcast result to all players
+            io.emit('game-ended', {
+              winners: winners.map((w) => ({ id: w.userId, card: w.card })),
+              prizePool,
+              split: prizePerWinner,
+              totalWinners: winners.length,
+            });
+
+            io.emit('sessions-updated', []);
+          } catch (error: any) {
+            socket.emit('error', { message: error.message || 'Failed to finalize game' });
+          }
+        }, 4000); // wait 4 seconds
+      }
+    } catch (error: any) {
+      socket.emit('error', { message: error.message || 'Failed to end game' });
+    }
+  }
+);
+
 
     socket.on('reset-game', async (data: { betAmount: number }) => {
       try {
         const { betAmount } = data;
-        stopGameCalling(betAmount); activeGames.delete(betAmount);
+        stopGameCalling(betAmount); 
+        activeGames.delete(betAmount);
         await GameSessionRepo.deleteMany({ betAmount });
         // No broadcast per original code
       } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to end game' }); }
