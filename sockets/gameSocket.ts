@@ -41,29 +41,49 @@ function shuffleNumbers(numbers: string[]): string[] {
   return a;
 }
 function startGameCalling(io: Server, betAmount: number) {
+  // Clear any existing interval for this bet amount
   if (activeGames.has(betAmount)) {
-    const g=activeGames.get(betAmount)!;
-    if (g.isCalling) return;
-  }
-  const all=generateAllBingoNumbers();
-  const shuf=shuffleNumbers(all);
-  const gs: GameState={ betAmount, calledNumbers:[], remainingNumbers:shuf, isCalling:true };
-  activeGames.set(betAmount, gs);
-
-  gs.callingInterval=setInterval(()=>{
-    const game=activeGames.get(betAmount);
-    if(!game||game.remainingNumbers.length===0){
-      stopGameCalling(betAmount); return;
+    const existingGame = activeGames.get(betAmount)!;
+    if (existingGame.callingInterval) {
+      clearInterval(existingGame.callingInterval);
     }
-    const nextNumber=game.remainingNumbers[0];
+  }
+  
+  const all = generateAllBingoNumbers();
+  const shuffled = shuffleNumbers(all);
+  const gameState: GameState = { 
+    betAmount, 
+    calledNumbers: [], 
+    remainingNumbers: shuffled, 
+    isCalling: true 
+  };
+  
+  activeGames.set(betAmount, gameState);
+
+  gameState.callingInterval = setInterval(() => {
+    const game = activeGames.get(betAmount);
+    if (!game || game.remainingNumbers.length === 0) {
+      stopGameCalling(betAmount);
+      return;
+    }
+    
+    const nextNumber = game.remainingNumbers[0];
     game.calledNumbers.push(nextNumber);
-    game.remainingNumbers=game.remainingNumbers.slice(1);
-    io.emit('number-called',{ betAmount, number: nextNumber, calledNumbers: game.calledNumbers });
-    if(game.remainingNumbers.length===0){
+    game.remainingNumbers = game.remainingNumbers.slice(1);
+    
+    // Emit only if there are listeners
+    io.emit('number-called', { 
+      betAmount, 
+      number: nextNumber, 
+      calledNumbers: game.calledNumbers 
+    });
+    
+    if (game.remainingNumbers.length === 0) {
       stopGameCalling(betAmount);
     }
   }, 4000);
 }
+
 function stopGameCalling(betAmount:number){
   const g=activeGames.get(betAmount);
   if(g&&g.callingInterval){ clearInterval(g.callingInterval); g.isCalling=false; }

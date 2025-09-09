@@ -282,14 +282,14 @@ router.post('/history', async (req: Request, res: Response) => {
     await gameHistory.save();
     
     // Update winner's wallet and earnings
-    const winner = await User.findById(winnerId);
-    if (winner) {
-      winner.wallet += prizePool;
-      winner.dailyEarnings = (winner.dailyEarnings || 0) + prizePool;
-      winner.weeklyEarnings = (winner.weeklyEarnings || 0) + prizePool;
-      winner.totalEarnings = (winner.totalEarnings || 0) + prizePool;
-      await winner.save();
-    }
+    // const winner = await User.findById(winnerId);
+    // if (winner) {
+    //   winner.wallet += prizePool;
+    //   winner.dailyEarnings = (winner.dailyEarnings || 0) + prizePool;
+    //   winner.weeklyEarnings = (winner.weeklyEarnings || 0) + prizePool;
+    //   winner.totalEarnings = (winner.totalEarnings || 0) + prizePool;
+    //   await winner.save();
+    // }
     
     res.json(gameHistory);
   } catch (error: any) {
