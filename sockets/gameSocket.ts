@@ -359,6 +359,8 @@ export function setupSocket(io: Server) {
                   (user as any).totalEarnings += prizePerWinner;
                   await user.save();
 
+                  pendingWinners[betAmount] = [];
+
                   io.to(w.userId).emit('winner-notification', {
                     message: `🎉 You won! ${winners.length} winners. Prize: ${prizePerWinner}`,
                     prize: prizePerWinner,
