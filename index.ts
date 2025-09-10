@@ -9,6 +9,7 @@ import transactionRoutes from './routes/transactions';
 import authRoutes from './routes/auth';
 import gameRoutes from './routes/game';
 import gamesRoutes from './routes/games';
+import accountantRoutes from './routes/accountant';
 import walletRoutes from './routes/wallet';
 import adminRoutes from './routes/admin';
 import agentRoutes from './routes/agent';
@@ -52,6 +53,7 @@ app.use('/api/agent', agentRoutes);
 app.use('/api/games', gamesRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/feedback', feedbackRoutes);
+app.use('/api/accountants', accountantRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
