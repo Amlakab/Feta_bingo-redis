@@ -232,7 +232,7 @@ router.post('/', authenticate, async (req, res) => {
       method,
       metadata
     } = req.body;
-   
+
     // Validate required fields
     if (!userId || !type || !amount || !reference) {
       return res.status(400).json({
@@ -257,7 +257,7 @@ router.post('/', authenticate, async (req, res) => {
       });
     }
 
-    // For withdrawals, check if user has sufficient balance but DON'T deduct yet
+    // Fetch user for withdrawals
     if (type === 'withdrawal') {
       const user = await User.findById(userId);
       if (!user) {
@@ -267,14 +267,24 @@ router.post('/', authenticate, async (req, res) => {
         });
       }
 
-      if (user.wallet < amount) {
+      // Check total pending withdrawals
+      const pendingWithdrawals = await Transaction.aggregate([
+        { $match: { userId: user._id, type: 'withdrawal', status: 'pending' } },
+        { $group: { _id: null, totalPending: { $sum: '$amount' } } }
+      ]);
+
+      const totalPending = pendingWithdrawals.length > 0 ? pendingWithdrawals[0].totalPending : 0;
+      const totalRequested = totalPending + amount;
+
+      if (totalRequested > user.wallet) {
         return res.status(400).json({
           success: false,
-          message: 'Insufficient balance'
+          message: `You already have ${totalPending} in pending withdrawals. Please wait until they are processed before requesting ${amount}.`
         });
       }
     }
 
+    // Check for duplicate transactionId
     if (transactionId) {
       const existingTx = await Transaction.findOne({ transactionId });
       if (existingTx) {
@@ -318,6 +328,7 @@ router.post('/', authenticate, async (req, res) => {
     });
   }
 });
+
 
 // UPDATE deposit status and handle wallet update (admin only)
 router.put('/deposit/:id', authenticate, async (req, res) => {
