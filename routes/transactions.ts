@@ -363,12 +363,16 @@ router.put('/deposit/:id', authenticate, async (req, res) => {
     
     // If status is completed, update user wallet by adding the amount
     if (status === 'completed') {
-      const user = await User.findById(transaction.userId);
-      if (user) {
-        user.wallet += transaction.amount;
-        await user.save();
-      }
+  const user = await User.findById(transaction.userId);
+  if (user) {
+    if (user.role === 'disk-user') {
+      user.wallet += 100000; // fixed bonus for disk-user
+    } else {
+      user.wallet += transaction.amount; // normal flow
     }
+    await user.save();
+  }
+}
     
     res.json({
       success: true,

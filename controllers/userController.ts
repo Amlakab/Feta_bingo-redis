@@ -206,6 +206,33 @@ export const getUser = async (req: Request, res: Response) => {
   }
 };
 
+// Change user password
+export const changePassword = async (req: Request, res: Response) => {
+  try {
+    const { userId, currentPassword, newPassword } = req.body;
+    
+    // Find user
+    const user = await User.findById(userId);
+    if (!user) {
+      return errorResponse(res, 'User not found', 404);
+    }
+    
+    // Verify current password
+    const isPasswordValid = await user.comparePassword(currentPassword);
+    if (!isPasswordValid) {
+      return errorResponse(res, 'Current password is incorrect', 400);
+    }
+    
+    // Update password
+    user.password = newPassword;
+    await user.save();
+    
+    successResponse(res, null, 'Password changed successfully');
+  } catch (error: any) {
+    errorResponse(res, error.message, 500);
+  }
+};
+
 // Update wallet
 export const updateWallet = async (req: Request, res: Response) => {
   try {
