@@ -344,12 +344,12 @@ router.put('/deposit/:id', authenticate, async (req, res) => {
       });
     }
     
-    if (transaction.type !== 'deposit') {
-      return res.status(400).json({
-        success: false,
-        message: 'This is not a deposit transaction'
-      });
-    }
+    // if (transaction.type !== 'deposit' || transaction.type !== 'game_purchase') {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'This is not a deposit transaction'
+    //   });
+    // }
     
     // Update transaction
     const updateData: any = { status };
