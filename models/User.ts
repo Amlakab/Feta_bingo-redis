@@ -30,7 +30,7 @@ const userSchema = new Schema<IUser>({
   },
   role: {
     type: String,
-    enum: ['user', 'agent', 'admin'],
+    enum: ['user','disk-user', 'agent', 'admin'],
     default: 'user',
   },
   wallet: {
