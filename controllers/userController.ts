@@ -257,6 +257,29 @@ export const updateWallet = async (req: Request, res: Response) => {
   }
 };
 
+// Set user wallet to a specific value
+export const setWallet = async (req: Request, res: Response) => {
+  try {
+    const { userId, amount } = req.body;
+
+    if (typeof amount !== 'number' || amount < 0) {
+      return errorResponse(res, 'Amount must be a non-negative number', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return errorResponse(res, 'User not found', 404);
+    }
+
+    user.wallet = amount;
+    await user.save();
+
+    successResponse(res, { wallet: user.wallet }, 'Wallet updated successfully');
+  } catch (error: any) {
+    errorResponse(res, error.message, 500);
+  }
+};
+
 // Update earnings
 export const updateEarnings = async (req: Request, res: Response) => {
   try {
