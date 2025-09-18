@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (MongoDB GameSession version) - CORRECTED
+// File: src/socket/setupSocket.ts (MongoDB GameSession version)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -14,13 +14,9 @@ interface GameState {
   calledNumbers: string[];
   remainingNumbers: string[];
   isCalling: boolean;
-  gameEnded: boolean;
   callingInterval?: NodeJS.Timeout;
 }
-
 const activeGames = new Map<number, GameState>();
-const pendingWinners: Record<number, { userId: string; card: number }[]> = {};
-
 function generateAllBingoNumbers(): string[] {
   const letters = ["B","I","N","G","O"];
   const ranges = [
@@ -36,7 +32,6 @@ function generateAllBingoNumbers(): string[] {
   });
   return all;
 }
-
 function shuffleNumbers(numbers: string[]): string[] {
   const a=[...numbers];
   for(let i=a.length-1;i>0;i--){
@@ -45,7 +40,6 @@ function shuffleNumbers(numbers: string[]): string[] {
   }
   return a;
 }
-
 function startGameCalling(io: Server, betAmount: number) {
   // Clear any existing interval for this bet amount
   if (activeGames.has(betAmount)) {
@@ -61,15 +55,14 @@ function startGameCalling(io: Server, betAmount: number) {
     betAmount, 
     calledNumbers: [], 
     remainingNumbers: shuffled, 
-    isCalling: true,
-    gameEnded: false
+    isCalling: true 
   };
   
   activeGames.set(betAmount, gameState);
 
   gameState.callingInterval = setInterval(() => {
     const game = activeGames.get(betAmount);
-    if (!game || game.remainingNumbers.length === 0 || game.gameEnded) {
+    if (!game || game.remainingNumbers.length === 0) {
       stopGameCalling(betAmount);
       return;
     }
@@ -78,7 +71,7 @@ function startGameCalling(io: Server, betAmount: number) {
     game.calledNumbers.push(nextNumber);
     game.remainingNumbers = game.remainingNumbers.slice(1);
     
-    // Emit to all clients
+    // Emit only if there are listeners
     io.emit('number-called', { 
       betAmount, 
       number: nextNumber, 
@@ -91,18 +84,12 @@ function startGameCalling(io: Server, betAmount: number) {
   }, 4000);
 }
 
-function stopGameCalling(betAmount: number) {
-  const game = activeGames.get(betAmount);
-  if (game && game.callingInterval) { 
-    clearInterval(game.callingInterval); 
-    game.isCalling = false;
-    game.gameEnded = true;
-  }
+function stopGameCalling(betAmount:number){
+  const g=activeGames.get(betAmount);
+  if(g&&g.callingInterval){ clearInterval(g.callingInterval); g.isCalling=false; }
 }
-
-function getGameState(betAmount: number) { 
-  return activeGames.get(betAmount); 
-}
+function getGameState(betAmount:number){ return activeGames.get(betAmount); }
+// -----------------------------------------
 
 // Helper: attach user phones
 async function enrichWithUserPhones(sessions: IGameSession[]) {
@@ -190,9 +177,7 @@ export function setupSocket(io: Server) {
         const user = await User.findById(userId);
 
         await GameSession.deleteMany({ betAmount, userId });
-        stopGameCalling(betAmount); 
-        activeGames.delete(betAmount);
-        delete pendingWinners[betAmount];
+        stopGameCalling(betAmount); activeGames.delete(betAmount);
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
@@ -216,9 +201,7 @@ export function setupSocket(io: Server) {
         if (user) { (user as any).wallet += totalRefund; await user.save(); }
 
         await GameSession.deleteMany({ betAmount, userId });
-        stopGameCalling(betAmount); 
-        activeGames.delete(betAmount);
-        delete pendingWinners[betAmount];
+        stopGameCalling(betAmount); activeGames.delete(betAmount);
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
@@ -344,55 +327,28 @@ export function setupSocket(io: Server) {
       try {
         stopGameCalling(betAmount);
         activeGames.delete(betAmount);
-        delete pendingWinners[betAmount];
         io.emit('game-stopped', { betAmount });
       } catch (error: any) { socket.emit('error', { message: error.message }); }
     });
 
     // === End game / winners ===
+    const pendingWinners: Record<number, { userId: string; card: number }[]> = {};
     socket.on('end-game', async ({ betAmount, winnerId, winnerCard, prizePool }) => {
       try {
-        const gameState = activeGames.get(betAmount);
-        if (!gameState || gameState.gameEnded) {
-          return socket.emit('error', { message: 'Game already ended' });
-        }
-
-        // Mark game as ended to stop calling numbers
-        gameState.gameEnded = true;
-        
         if (!pendingWinners[betAmount]) pendingWinners[betAmount] = [];
-        
-        // Check if this winner already exists
-        const existingWinner = pendingWinners[betAmount].find(
-          w => w.userId === winnerId && w.card === winnerCard
-        );
-        
-        if (!existingWinner) {
-          pendingWinners[betAmount].push({ userId: winnerId, card: winnerCard });
-          
-          // Broadcast winner announcement to all clients
-          io.emit('winner-announcement', {
-            betAmount,
-            winnerId,
-            winnerCard,
-            message: `Player ${winnerCard} claims BINGO!`
-          });
-        }
+        pendingWinners[betAmount].push({ userId: winnerId, card: winnerCard });
 
-        // Start 3-second grace period on first winner
         if (pendingWinners[betAmount].length === 1) {
+          stopGameCalling(betAmount);
           setTimeout(async () => {
             try {
               const winners = pendingWinners[betAmount] || [];
               delete pendingWinners[betAmount];
-              
-              // Stop calling completely
-              stopGameCalling(betAmount);
-              
+              activeGames.delete(betAmount);
+              await GameSession.deleteMany({ betAmount });
+
               if (!winners.length) return;
-              
               const prizePerWinner = prizePool / winners.length;
-              const winnerUpdates = [];
 
               for (const w of winners) {
                 const user = await User.findById(w.userId);
@@ -402,21 +358,20 @@ export function setupSocket(io: Server) {
                   (user as any).weeklyEarnings += prizePerWinner;
                   (user as any).totalEarnings += prizePerWinner;
                   await user.save();
-                  
-                  winnerUpdates.push({
-                    userId: w.userId,
+
+                  pendingWinners[betAmount] = [];
+
+                  io.to(w.userId).emit('winner-notification', {
+                    message: `🎉 You won! ${winners.length} winners. Prize: ${prizePerWinner}`,
+                    prize: prizePerWinner,
+                    totalWinners: winners.length,
                     card: w.card,
-                    prize: prizePerWinner
                   });
                 }
               }
 
-              // Delete all sessions for this bet amount
-              await GameSession.deleteMany({ betAmount });
-
-              // Broadcast final game results to all clients
               io.emit('game-ended', {
-                winners: winnerUpdates,
+                winners: winners.map((w) => ({ id: w.userId, card: w.card })),
                 prizePool,
                 split: prizePerWinner,
                 totalWinners: winners.length,
@@ -426,30 +381,18 @@ export function setupSocket(io: Server) {
             } catch (error: any) {
               socket.emit('error', { message: error.message || 'Failed to finalize game' });
             }
-          }, 3000); // 3-second grace period
+          }, 4000);
         }
-      } catch (error: any) { 
-        socket.emit('error', { message: error.message || 'Failed to end game' }); 
-      }
+      } catch (error: any) { socket.emit('error', { message: error.message || 'Failed to end game' }); }
     });
 
     socket.on('reset-game', async ({ betAmount }) => {
-      try { 
-        stopGameCalling(betAmount); 
-        activeGames.delete(betAmount); 
-        delete pendingWinners[betAmount];
-        await GameSession.deleteMany({ betAmount }); 
-      }
+      try { stopGameCalling(betAmount); activeGames.delete(betAmount); await GameSession.deleteMany({ betAmount }); }
       catch (error: any) { socket.emit('error', { message: error.message }); }
     });
 
     socket.on('test-game', async ({ betAmount }) => {
-      try { 
-        stopGameCalling(betAmount); 
-        activeGames.delete(betAmount); 
-        delete pendingWinners[betAmount];
-        await GameSession.deleteMany({ betAmount }); 
-      }
+      try { stopGameCalling(betAmount); activeGames.delete(betAmount); await GameSession.deleteMany({ betAmount }); }
       catch (error: any) { socket.emit('error', { message: error.message }); }
     });
 
