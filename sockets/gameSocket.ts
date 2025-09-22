@@ -144,7 +144,7 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     // Start grace period timer
     gameState.gracePeriodTimer = setTimeout(async () => {
       await finalizeGame(io, betAmount, prizePool);
-    }, 3000);
+    }, 4000);
   }
 
   // Add winner to pending list
