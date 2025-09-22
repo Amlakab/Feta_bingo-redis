@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (COMPLETE CORRECTED VERSION)
+// File: src/socket/setupSocket.ts (MULTIPLE WINNERS FIXED VERSION)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -19,6 +19,8 @@ interface GameState {
   isGameEnded: boolean;
   pendingWinners: Array<{userId: string; card: number}>;
   gracePeriodTimer?: NodeJS.Timeout;
+  numberOfPlayers: number;
+  prizePool: number; // ADDED: Store consistent prize pool
 }
 
 const activeGames = new Map<number, GameState>();
@@ -48,7 +50,7 @@ function shuffleNumbers(numbers: string[]): string[] {
   return a;
 }
 
-function startGameCalling(io: Server, betAmount: number) {
+async function startGameCalling(io: Server, betAmount: number) {
   // Clear any existing interval for this bet amount
   if (activeGames.has(betAmount)) {
     const existingGame = activeGames.get(betAmount)!;
@@ -60,6 +62,14 @@ function startGameCalling(io: Server, betAmount: number) {
     }
   }
   
+  // GET ACTUAL NUMBER OF PLAYERS AND CALCULATE PRIZE POOL
+  const activeSessions = await GameSession.find({ 
+    betAmount, 
+    status: { $in: ['active', 'playing', 'ready'] } 
+  });
+  const numberOfPlayers = activeSessions.length;
+  const prizePool = numberOfPlayers * betAmount * 0.8; // 80% of total bets
+  
   const all = generateAllBingoNumbers();
   const shuffled = shuffleNumbers(all);
   const gameState: GameState = { 
@@ -68,10 +78,14 @@ function startGameCalling(io: Server, betAmount: number) {
     remainingNumbers: shuffled, 
     isCalling: true,
     isGameEnded: false,
-    pendingWinners: []
+    pendingWinners: [],
+    numberOfPlayers: numberOfPlayers,
+    prizePool: prizePool // STORE consistent prize pool
   };
   
   activeGames.set(betAmount, gameState);
+  
+  console.log(`Game started for betAmount: ${betAmount}, Players: ${numberOfPlayers}, Prize Pool: ${prizePool}`);
 
   gameState.callingInterval = setInterval(() => {
     const game = activeGames.get(betAmount);
@@ -112,7 +126,8 @@ function getGameState(betAmount: number) {
   return activeGames.get(betAmount); 
 }
 
-async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: string, winnerCard: number, prizePool: number) {
+// CHANGED: Remove prizePool parameter - use the stored prize pool
+async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: string, winnerCard: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
     console.log(`No active game found for betAmount: ${betAmount}`);
@@ -138,12 +153,13 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     io.emit('game-stopped', { 
       betAmount, 
       firstWinner: { userId: winnerId, card: winnerCard },
-      message: `Player ${winnerCard} wins! 3-second grace period started.`
+      message: `Player ${winnerCard} wins! 3-second grace period started.`,
+      prizePool: gameState.prizePool // Include prize pool in broadcast
     });
 
     // Start grace period timer
     gameState.gracePeriodTimer = setTimeout(async () => {
-      await finalizeGame(io, betAmount, prizePool);
+      await finalizeGame(io, betAmount);
     }, 4000);
   }
 
@@ -157,11 +173,13 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     winnerId,
     winnerCard,
     totalWinnersSoFar: gameState.pendingWinners.length,
-    message: `Player ${winnerCard} wins!`
+    message: `Player ${winnerCard} wins!`,
+    prizePool: gameState.prizePool
   });
 }
 
-async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
+// CHANGED: Remove prizePool parameter - use the stored prize pool
+async function finalizeGame(io: Server, betAmount: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
     console.log(`Cannot finalize game - no state found for betAmount: ${betAmount}`);
@@ -172,6 +190,10 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
   console.log(`Finalizing game for betAmount: ${betAmount} with ${winners.length} winners`);
   
   try {
+    // USE THE STORED PRIZE POOL
+    const prizePool = gameState.prizePool;
+    const houseFee = gameState.numberOfPlayers * betAmount * 0.2; // 20% house fee
+
     // Delete all sessions for this bet amount
     await GameSession.deleteMany({ betAmount });
     console.log(`Deleted sessions for betAmount: ${betAmount}`);
@@ -179,6 +201,8 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     let prizePerWinner = 0;
     if (winners.length > 0) {
       prizePerWinner = prizePool / winners.length;
+
+      console.log(`Distributing prize pool: ${prizePool} among ${winners.length} winners, each gets: ${prizePerWinner}`);
 
       // Update winners' wallets and create game history
       for (const winner of winners) {
@@ -192,13 +216,16 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
           console.log(`Updated wallet for user: ${winner.userId}, added ${prizePerWinner}`);
         }
 
-        // Create game history record (uncomment if you have GameHistory model)
+        // Create game history record
         await GameHistory.create({
           winnerId: winner.userId,
           winnerCard: winner.card,
-          prizePool: prizePerWinner,
-          numberOfPlayers: winners.length, // you need to calculate this,
+          prizePool: prizePool,
+          prizePerWinner: prizePerWinner,
+          numberOfPlayers: gameState.numberOfPlayers,
+          numberOfWinners: winners.length,
           betAmount: betAmount,
+          houseFee: houseFee,
           createdAt: new Date()
         });
       }
@@ -250,7 +277,7 @@ async function enrichWithUserPhones(sessions: IGameSession[]) {
 }
 
 export function setupSocket(io: Server) {
-  io.use(async (socket: AuthenticatedSocket, next) => {
+   io.use(async (socket: AuthenticatedSocket, next) => {
     try {
       const token = (socket.handshake as any).auth?.token || (socket.handshake.query as any).token;
       if (!token) return next(new Error('Authentication error'));
@@ -491,9 +518,9 @@ export function setupSocket(io: Server) {
     });
 
     // === End game / winners ===
-    socket.on('end-game', async ({ betAmount, winnerId, winnerCard, prizePool }) => {
+   socket.on('end-game', async ({ betAmount, winnerId, winnerCard, prizePool }) => {
       try {
-        console.log(`Winner submission received: ${winnerId}, card ${winnerCard}, betAmount: ${betAmount}`);
+        console.log(`Winner submission received: ${winnerId}, card ${winnerCard}, betAmount: ${betAmount}, client prizePool: ${prizePool}`);
         
         const gameState = activeGames.get(betAmount);
         if (!gameState) {
@@ -506,8 +533,8 @@ export function setupSocket(io: Server) {
           return socket.emit('error', { message: 'Game has already ended' });
         }
 
-        // Handle the winner submission
-        await handleWinnerSubmission(io, betAmount, winnerId, winnerCard, prizePool);
+        // CHANGED: Pass the stored prize pool instead of client-provided one
+        await handleWinnerSubmission(io, betAmount, winnerId, winnerCard);
         
       } catch (error: any) { 
         console.error('Error in end-game:', error);
