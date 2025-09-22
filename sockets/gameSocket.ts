@@ -4,6 +4,7 @@
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
 import User from '../models/User';
+import GameHistory from '../models/GameHistory';
 import GameSession, { IGameSession } from '../models/GameSession';
 
 interface AuthenticatedSocket extends Socket { userId?: string; }
@@ -192,14 +193,14 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
         }
 
         // Create game history record (uncomment if you have GameHistory model)
-        // await GameHistory.create({
-        //   winnerId: winner.userId,
-        //   winnerCard: winner.card,
-        //   prizePool: prizePool,
-        //   numberOfPlayers: // you need to calculate this,
-        //   betAmount: betAmount,
-        //   createdAt: new Date()
-        // });
+        await GameHistory.create({
+          winnerId: winner.userId,
+          winnerCard: winner.card,
+          prizePool: prizePerWinner,
+          numberOfPlayers: winners.length, // you need to calculate this,
+          betAmount: betAmount,
+          createdAt: new Date()
+        });
       }
 
       console.log(`Broadcasting final results to all clients: ${winners.length} winners`);
