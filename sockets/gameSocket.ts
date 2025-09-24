@@ -160,6 +160,7 @@ function getGameState(betAmount: number) {
   return activeGames.get(betAmount); 
 }
 
+// CORRECTED winner submission handler in setupSocket.ts
 async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: string, winnerCard: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
@@ -177,8 +178,12 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // Stop calling numbers immediately when first winner is found
-  if (!gameState.isGameEnded) {
+  // Add winner to pending list FIRST
+  gameState.pendingWinners.push({ userId: winnerId, card: winnerCard });
+  console.log(`✅ Winner added: ${winnerId}, card ${winnerCard}. Total winners: ${gameState.pendingWinners.length}`);
+
+  // If this is the FIRST winner, stop the game and start grace period
+  if (gameState.pendingWinners.length === 1 && !gameState.isGameEnded) {
     console.log(`🎉 First winner found! Stopping game for betAmount: ${betAmount}`);
     stopGameCalling(betAmount);
     
@@ -198,11 +203,7 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     }, 4000);
   }
 
-  // Add winner to pending list
-  gameState.pendingWinners.push({ userId: winnerId, card: winnerCard });
-  console.log(`✅ Winner added: ${winnerId}, card ${winnerCard}. Total winners: ${gameState.pendingWinners.length}`);
-
-  // Broadcast individual winner for toast notification
+  // Broadcast individual winner announcement for ALL winners (including subsequent ones)
   io.emit('winner-announced', {
     betAmount,
     winnerId,
