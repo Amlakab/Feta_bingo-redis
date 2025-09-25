@@ -457,14 +457,26 @@ export function setupSocket(io: Server) {
     });
 
     socket.on('update-session-status-by-bet', async ({ betAmount, status }) => {
-      try {
-        await GameSession.updateMany({ betAmount, status: 'ready' }, { status });
-        const updated = await GameSession.find({ betAmount, status: { $in: ['active','ready','playing'] } });
-        io.emit('sessions-updated', await enrichWithUserPhones(updated));
-      } catch (error: any) {
-        socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
-      }
+  try {
+    // 1. Perform the update only on documents with status 'ready'
+    const updateResult = await GameSession.updateMany(
+      { betAmount, status: 'ready' },
+      { $set: { status: status } } // Use $set operator for clarity
+    );
+
+    // 2. Find only the documents that were just updated (now have the new status)
+    const updatedSessions = await GameSession.find({
+      betAmount,
+      status: status // This finds documents with the NEW status
     });
+
+    // 3. Emit the list of updated sessions
+    io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+
+  } catch (error: any) {
+    socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
+  }
+});
 
     socket.on('update-session-status-by-user-bet', async ({ userId, betAmount, status }) => {
       try {
