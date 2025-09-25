@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (COMPLETE CORRECTED VERSION)
+// File: src/socket/setupSocket.ts (FULLY CORRECTED VERSION)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -19,6 +19,7 @@ interface GameState {
   isGameEnded: boolean;
   pendingWinners: Array<{userId: string; card: number}>;
   gracePeriodTimer?: NodeJS.Timeout;
+  gracePeriodActive: boolean; // NEW: Track if grace period is active
 }
 
 const activeGames = new Map<number, GameState>();
@@ -68,7 +69,8 @@ function startGameCalling(io: Server, betAmount: number) {
     remainingNumbers: shuffled, 
     isCalling: true,
     isGameEnded: false,
-    pendingWinners: []
+    pendingWinners: [],
+    gracePeriodActive: false // NEW: Initialize grace period as inactive
   };
   
   activeGames.set(betAmount, gameState);
@@ -96,6 +98,7 @@ function startGameCalling(io: Server, betAmount: number) {
   }, 5000);
 }
 
+// FIXED: stopGameCalling only stops number calling, doesn't end game
 function stopGameCalling(betAmount: number) {
   const g = activeGames.get(betAmount);
   if (g) {
@@ -104,7 +107,20 @@ function stopGameCalling(betAmount: number) {
       g.callingInterval = undefined;
     }
     g.isCalling = false;
+    // DON'T set g.isGameEnded = true here - game continues during grace period
+  }
+}
+
+// NEW: Function to fully end the game
+function endGameCompletely(betAmount: number) {
+  const g = activeGames.get(betAmount);
+  if (g) {
     g.isGameEnded = true;
+    g.gracePeriodActive = false;
+    if (g.gracePeriodTimer) {
+      clearTimeout(g.gracePeriodTimer);
+      g.gracePeriodTimer = undefined;
+    }
   }
 }
 
@@ -112,6 +128,7 @@ function getGameState(betAmount: number) {
   return activeGames.get(betAmount); 
 }
 
+// FIXED: handleWinnerSubmission with proper grace period handling
 async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: string, winnerCard: number, prizePool: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
@@ -119,7 +136,7 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // Check if this winner was already sub
+  // Check if this winner was already submitted
   const isDuplicate = gameState.pendingWinners.some(w => 
     w.userId === winnerId && w.card === winnerCard
   );
@@ -129,38 +146,47 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // Stop calling numbers immediately when first winner is found
-  if (!gameState.isGameEnded) {
-    console.log(`First winner found! Stopping game for betAmount: ${betAmount}`);
+  // FIXED: Stop calling numbers when first winner is found (only if still calling)
+  if (gameState.isCalling) {
+    console.log(`First winner found! Stopping number calling for betAmount: ${betAmount}`);
     stopGameCalling(betAmount);
     
-    // Broadcast that game has stopped and first winner found
+    // Activate grace period
+    gameState.gracePeriodActive = true;
+    
+    // Broadcast game-stop event (numbers stopped, grace period started)
     io.emit('game-stopped', { 
       betAmount, 
       firstWinner: { userId: winnerId, card: winnerCard },
-      message: `Player ${winnerCard} wins! 3-second grace period started.`
+      message: `Player ${winnerCard} wins! 4-second grace period started.`,
+      allWinners: gameState.pendingWinners // Include any existing winners
     });
 
-    // Start grace period timer
-    gameState.gracePeriodTimer = setTimeout(async () => {
-      await finalizeGame(io, betAmount, prizePool);
-    }, 4000);
+    // FIXED: Start grace period timer ONLY ONCE for the first winner
+    if (!gameState.gracePeriodTimer) {
+      console.log(`Starting 4-second grace period timer for betAmount: ${betAmount}`);
+      gameState.gracePeriodTimer = setTimeout(async () => {
+        console.log(`Grace period ended for betAmount: ${betAmount}, finalizing game...`);
+        await finalizeGame(io, betAmount, prizePool);
+      }, 4000); // 4 seconds grace period
+    }
   }
 
-  // Add winner to pending list
+  // Add winner to pending list (works for both first and subsequent winners)
   gameState.pendingWinners.push({ userId: winnerId, card: winnerCard });
   console.log(`Winner added: ${winnerId}, card ${winnerCard}. Total winners: ${gameState.pendingWinners.length}`);
 
-  // Broadcast individual winner for toast notification
+  // Broadcast individual winner announcement
   io.emit('winner-announced', {
     betAmount,
     winnerId,
     winnerCard,
     totalWinnersSoFar: gameState.pendingWinners.length,
-    message: `Player ${winnerCard} wins!`
+    message: `Player ${winnerCard} wins! (${gameState.pendingWinners.length} winners so far)`
   });
 }
 
+// FIXED: finalizeGame - processes all winners and ends game completely
 async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
@@ -168,10 +194,17 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     return;
   }
 
+  // End game completely
+  endGameCompletely(betAmount);
+  
   const winners = gameState.pendingWinners;
   console.log(`Finalizing game for betAmount: ${betAmount} with ${winners.length} winners`);
   
   try {
+
+    const sessions = await GameSession.find({ betAmount });
+    const numberOfPlayers = sessions.length;
+
     // Delete all sessions for this bet amount
     await GameSession.deleteMany({ betAmount });
     console.log(`Deleted sessions for betAmount: ${betAmount}`);
@@ -192,12 +225,12 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
           console.log(`Updated wallet for user: ${winner.userId}, added ${prizePerWinner}`);
         }
 
-        // Create game history record (uncomment if you have GameHistory model)
+        // Create game history record
         await GameHistory.create({
           winnerId: winner.userId,
           winnerCard: winner.card,
           prizePool: prizePerWinner,
-          numberOfPlayers: winners.length, // you need to calculate this,
+          numberOfPlayers: numberOfPlayers,
           betAmount: betAmount,
           createdAt: new Date()
         });
@@ -205,7 +238,7 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
 
       console.log(`Broadcasting final results to all clients: ${winners.length} winners`);
       
-      // Broadcast final game results to ALL clients
+      // Broadcast final game-ended event
       io.emit('game-ended', {
         winners: winners,
         prizePool: prizePool,
@@ -328,6 +361,7 @@ export function setupSocket(io: Server) {
         const gameState = activeGames.get(betAmount);
         if (gameState) {
           stopGameCalling(betAmount);
+          endGameCompletely(betAmount);
         }
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
@@ -357,6 +391,7 @@ export function setupSocket(io: Server) {
         const gameState = activeGames.get(betAmount);
         if (gameState && !gameState.isGameEnded) {
           stopGameCalling(betAmount);
+          endGameCompletely(betAmount);
         }
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
@@ -455,7 +490,7 @@ export function setupSocket(io: Server) {
     socket.on('start-game', ({ betAmount }) => {
       try {
         const gameState = activeGames.get(betAmount);
-        if (!gameState || !gameState.isGameEnded) {
+        if (!gameState || gameState.isGameEnded) {
           startGameCalling(io, betAmount);
         }
         const currentGameState = getGameState(betAmount);
@@ -485,7 +520,7 @@ export function setupSocket(io: Server) {
     socket.on('stop-game', ({ betAmount }) => {
       try {
         stopGameCalling(betAmount);
-        activeGames.delete(betAmount);
+        endGameCompletely(betAmount);
         io.emit('game-stopped', { betAmount });
       } catch (error: any) { socket.emit('error', { message: error.message }); }
     });
@@ -501,8 +536,9 @@ export function setupSocket(io: Server) {
           return socket.emit('error', { message: 'No active game found' });
         }
 
+        // FIXED: Allow submissions during grace period (when isCalling is false but game is not ended)
         if (gameState.isGameEnded) {
-          console.log(`Game already ended for betAmount: ${betAmount}`);
+          console.log(`Game already fully ended for betAmount: ${betAmount}`);
           return socket.emit('error', { message: 'Game has already ended' });
         }
 
@@ -518,6 +554,7 @@ export function setupSocket(io: Server) {
     socket.on('reset-game', async ({ betAmount }) => {
       try { 
         stopGameCalling(betAmount); 
+        endGameCompletely(betAmount);
         activeGames.delete(betAmount); 
         await GameSession.deleteMany({ betAmount }); 
       } catch (error: any) { socket.emit('error', { message: error.message }); }
@@ -526,6 +563,7 @@ export function setupSocket(io: Server) {
     socket.on('test-game', async ({ betAmount }) => {
       try { 
         stopGameCalling(betAmount); 
+        endGameCompletely(betAmount);
         activeGames.delete(betAmount); 
         await GameSession.deleteMany({ betAmount }); 
       } catch (error: any) { socket.emit('error', { message: error.message }); }
