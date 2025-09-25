@@ -93,7 +93,7 @@ function startGameCalling(io: Server, betAmount: number) {
     if (game.remainingNumbers.length === 0) {
       stopGameCalling(betAmount);
     }
-  }, 4000);
+  }, 5000);
 }
 
 function stopGameCalling(betAmount: number) {
