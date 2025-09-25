@@ -119,7 +119,7 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // Check if this winner was already submittedddd
+  // Check if this winner was already sub
   const isDuplicate = gameState.pendingWinners.some(w => 
     w.userId === winnerId && w.card === winnerCard
   );
