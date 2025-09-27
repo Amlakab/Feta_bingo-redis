@@ -9,7 +9,8 @@ import {
   updateWallet,
   updateEarnings,
   changePassword,
-  setWallet
+  setWallet,
+  minusWallet
 } from '../controllers/userController';
 import { authenticate } from '../middleware/auth';
 
@@ -28,5 +29,6 @@ router.patch('/:userId/status', authenticate, updateUserStatus);
 router.delete('/:userId', authenticate, deleteUser);
 router.put('/change-password', authenticate, changePassword);
 router.put('/update-wallet', authenticate, setWallet);
+router.put('/minus-wallet', authenticate, minusWallet);
 
 export default router;
