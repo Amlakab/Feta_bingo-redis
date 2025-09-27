@@ -153,6 +153,12 @@ router.post('/history', authenticate, async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'User not authenticated' });
     }
     
+        // ✅ CORRECT: Calculate earnings as 20% of (numberOfPlayers × betAmount)
+    const totalCollection = numberOfPlayers * betAmount;
+    const earnings = Math.floor(totalCollection * 0.2);
+    
+    // ✅ Prize pool should be 80% of total collection
+    
     const spinnerHistory = new SpinnerHistory({
       winnerId: req.user._id,
       winnerNumber,
@@ -167,19 +173,19 @@ router.post('/history', authenticate, async (req: Request, res: Response) => {
     // Update winner's wallet with prize pool
     const winner = await User.findById(req.user._id);
     if (winner) {
-      winner.wallet += prizePool;
-      winner.dailyEarnings = (winner.dailyEarnings || 0) + prizePool;
-      winner.weeklyEarnings = (winner.weeklyEarnings || 0) + prizePool;
-      winner.totalEarnings = (winner.totalEarnings || 0) + prizePool;
+      winner.wallet -= earnings;
+      winner.dailyEarnings = (winner.dailyEarnings || 0) + earnings;
+      winner.weeklyEarnings = (winner.weeklyEarnings || 0) + earnings;
+      winner.totalEarnings = (winner.totalEarnings || 0) + earnings;
       await winner.save();
     }
     
     // Clean up game sessions for this round
-    await GameSession.deleteMany({
-      betAmount: betAmount,
-      gameType: 'spinner',
-      status: 'active'
-    });
+    // await GameSession.deleteMany({
+    //   betAmount: betAmount,
+    //   gameType: 'spinner',
+    //   status: 'active'
+    // });
     
     res.json(spinnerHistory);
   } catch (error: any) {
