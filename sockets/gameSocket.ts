@@ -595,16 +595,25 @@ export function setupSocket(io: Server) {
       }
     });
 
-    socket.on('get-server-time', () => {
-      try {
-        socket.emit('server-time', {
-          serverTime: new Date().toISOString(),
-          timestamp: Date.now()
-        });
-      } catch (error: any) {
-        socket.emit('error', { message: 'Failed to get server time' });
-      }
-    });
+    // Add this inside your io.on('connection') handler in setupSocket.ts
+      socket.on('get-server-time', (callback) => {
+        try {
+          const serverTime = Date.now();
+          const response = {
+            serverTime: serverTime,
+            serverTimeISO: new Date(serverTime).toISOString()
+          };
+          
+          if (typeof callback === 'function') {
+            callback(response);
+          }
+        } catch (error) {
+          console.error('Error getting server time:', error);
+          if (typeof callback === 'function') {
+            callback({ error: 'Failed to get server time' });
+          }
+        }
+      });
 
     socket.on('reset-game', async ({ betAmount }) => {
       try { 
