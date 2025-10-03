@@ -315,34 +315,34 @@ export function setupSocket(io: Server) {
 
     // === Create session ===
     // === Create session ===
-    socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; /* remove createdAt */ }) => {
-      try {
-        const { userId, cardNumber, betAmount } = data; // remove createdAt from destructuring
-        if (userId !== socket.userId) return socket.emit('error', { message: 'Unauthorized' });
+  socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; /* remove createdAt */ }) => {
+    try {
+      const { userId, cardNumber, betAmount } = data; // remove createdAt from destructuring
+      if (userId !== socket.userId) return socket.emit('error', { message: 'Unauthorized' });
 
-        const existing = await GameSession.findOne({
-          cardNumber, betAmount, status: { $in: ['ready','active','playing'] }
-        });
-        if (existing) return socket.emit('error', { message: 'Card already taken' });
+      const existing = await GameSession.findOne({
+        cardNumber, betAmount, status: { $in: ['ready','active','playing'] }
+      });
+      if (existing) return socket.emit('error', { message: 'Card already taken' });
 
-        const created = await GameSession.create({
-          userId: new mongoose.Types.ObjectId(userId),
-          cardNumber, 
-          betAmount, 
-          status: 'active', 
-          createdAt: new Date() // Set createdAt on server side
-        });
+      const created = await GameSession.create({
+        userId: new mongoose.Types.ObjectId(userId),
+        cardNumber, 
+        betAmount, 
+        status: 'active', 
+        createdAt: new Date() // Set createdAt on server side
+      });
 
-        const populatedCreated = (await enrichWithUserPhones([created]))[0];
-        const allSessions = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
-        const enrichedAll = await enrichWithUserPhones(allSessions);
+      const populatedCreated = (await enrichWithUserPhones([created]))[0];
+      const allSessions = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
+      const enrichedAll = await enrichWithUserPhones(allSessions);
 
-        io.emit('session-created', populatedCreated);
-        io.emit('sessions-updated', enrichedAll);
-      } catch (error: any) {
-        socket.emit('error', { message: error.message || 'Failed to create session' });
-      }
-    });
+      io.emit('session-created', populatedCreated);
+      io.emit('sessions-updated', enrichedAll);
+    } catch (error: any) {
+      socket.emit('error', { message: error.message || 'Failed to create session' });
+    }
+  });
 
     // === Clear selected ===
     socket.on('clear-selected', async ({ betAmount, userId }) => {
@@ -592,6 +592,17 @@ export function setupSocket(io: Server) {
       } catch (error: any) {
         console.error('Error calculating remaining time:', error);
         socket.emit('error', { message: 'Failed to calculate remaining time' });
+      }
+    });
+
+    socket.on('get-server-time', () => {
+      try {
+        socket.emit('server-time', {
+          serverTime: new Date().toISOString(),
+          timestamp: Date.now()
+        });
+      } catch (error: any) {
+        socket.emit('error', { message: 'Failed to get server time' });
       }
     });
 
