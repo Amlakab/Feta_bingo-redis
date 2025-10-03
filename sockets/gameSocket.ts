@@ -314,9 +314,10 @@ export function setupSocket(io: Server) {
     });
 
     // === Create session ===
-    socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
+    // === Create session ===
+    socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; /* remove createdAt */ }) => {
       try {
-        const { userId, cardNumber, betAmount, createdAt } = data;
+        const { userId, cardNumber, betAmount } = data; // remove createdAt from destructuring
         if (userId !== socket.userId) return socket.emit('error', { message: 'Unauthorized' });
 
         const existing = await GameSession.findOne({
@@ -326,7 +327,10 @@ export function setupSocket(io: Server) {
 
         const created = await GameSession.create({
           userId: new mongoose.Types.ObjectId(userId),
-          cardNumber, betAmount, status: 'active', createdAt
+          cardNumber, 
+          betAmount, 
+          status: 'active', 
+          createdAt: new Date() // Set createdAt on server side
         });
 
         const populatedCreated = (await enrichWithUserPhones([created]))[0];
