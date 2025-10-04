@@ -564,110 +564,53 @@ export function setupSocket(io: Server) {
       }
     });
 
-    // Server-side time calculation endpoints
-socket.on('get-server-time', (callback) => {
-  try {
-    const serverTime = Date.now();
-    const response = {
-      serverTime: serverTime,
-      serverTimeISO: new Date(serverTime).toISOString()
-    };
-    
-    if (typeof callback === 'function') {
-      callback(response);
-    }
-  } catch (error) {
-    console.error('Error getting server time:', error);
-    if (typeof callback === 'function') {
-      callback({ error: 'Failed to get server time' });
-    }
-  }
-});
-
-socket.on('get-remaining-time', async ({ betAmount, createdAt }, callback) => {
-  try {
-    // Find earliest active session for this bet amount
-    const earliestSession = await GameSession.findOne({
-      betAmount,
-      status: { $in: ['active', 'ready'] }
-    }).sort({ createdAt: 1 });
-
-    const currentServerTime = Date.now();
-    let remainingTime;
-
-    if (earliestSession) {
-      // Case 1: Sessions exist - calculate based on earliest session
-      const sessionStartTime = new Date(earliestSession.createdAt).getTime();
-      const elapsedSeconds = Math.floor((currentServerTime - sessionStartTime) / 1000);
-      remainingTime = Math.max(0, 45 - elapsedSeconds);
-    } else {
-      // Case 2: No sessions - use difference between server time and createdAt prop
-      const createdTime = new Date(createdAt).getTime();
-      const elapsedSeconds = Math.floor((currentServerTime - createdTime) / 1000);
-      remainingTime = Math.max(0, 45 - elapsedSeconds);
-    }
-
-    if (typeof callback === 'function') {
-      callback({ 
-        remainingTime,
-        serverTime: currentServerTime,
-        hasSessions: !!earliestSession
-      });
-    }
-  } catch (error) {
-    console.error('Error calculating remaining time:', error);
-    if (typeof callback === 'function') {
-      callback({ error: 'Failed to calculate remaining time' });
-    }
-  }
-});
     // Add this endpoint in the io.on('connection') section, after the other endpoints
-    // socket.on('get-remaining-time', async ({ betAmount }) => {
-    //   try {
-    //     // Find the earliest active session for this bet amount
-    //     const earliestSession = await GameSession.findOne({
-    //       betAmount,
-    //       status: { $in: ['active', 'ready'] }
-    //     }).sort({ createdAt: 1 });
+    socket.on('get-remaining-time', async ({ betAmount }) => {
+      try {
+        // Find the earliest active session for this bet amount
+        const earliestSession = await GameSession.findOne({
+          betAmount,
+          status: { $in: ['active', 'ready'] }
+        }).sort({ createdAt: 1 });
 
-    //     if (!earliestSession) {
-    //       // No active sessions, return initial time (45 seconds)
-    //       socket.emit('remaining-time', { betAmount, remainingTime: 45 });
-    //       return;
-    //     }
+        if (!earliestSession) {
+          // No active sessions, return initial time (45 seconds)
+          socket.emit('remaining-time', { betAmount, remainingTime: 45 });
+          return;
+        }
 
-    //     // Calculate remaining time based on the earliest session
-    //     const sessionStartTime = new Date(earliestSession.createdAt).getTime();
-    //     const currentTime = new Date().getTime();
-    //     const elapsedSeconds = Math.floor((currentTime - sessionStartTime) / 1000);
-    //     const remainingTime = Math.max(0, 45 - elapsedSeconds);
+        // Calculate remaining time based on the earliest session
+        const sessionStartTime = new Date(earliestSession.createdAt).getTime();
+        const currentTime = new Date().getTime();
+        const elapsedSeconds = Math.floor((currentTime - sessionStartTime) / 1000);
+        const remainingTime = Math.max(0, 45 - elapsedSeconds);
 
-    //     socket.emit('remaining-time', { betAmount, remainingTime });
-    //   } catch (error: any) {
-    //     console.error('Error calculating remaining time:', error);
-    //     socket.emit('error', { message: 'Failed to calculate remaining time' });
-    //   }
-    // });
+        socket.emit('remaining-time', { betAmount, remainingTime });
+      } catch (error: any) {
+        console.error('Error calculating remaining time:', error);
+        socket.emit('error', { message: 'Failed to calculate remaining time' });
+      }
+    });
 
-    // // Add this inside your io.on('connection') handler in setupSocket.ts
-    //   socket.on('get-server-time', (callback) => {
-    //     try {
-    //       const serverTime = Date.now();
-    //       const response = {
-    //         serverTime: serverTime,
-    //         serverTimeISO: new Date(serverTime).toISOString()
-    //       };
+    // Add this inside your io.on('connection') handler in setupSocket.ts
+      socket.on('get-server-time', (callback) => {
+        try {
+          const serverTime = Date.now();
+          const response = {
+            serverTime: serverTime,
+            serverTimeISO: new Date(serverTime).toISOString()
+          };
           
-    //       if (typeof callback === 'function') {
-    //         callback(response);
-    //       }
-    //     } catch (error) {
-    //       console.error('Error getting server time:', error);
-    //       if (typeof callback === 'function') {
-    //         callback({ error: 'Failed to get server time' });
-    //       }
-    //     }
-    //   });
+          if (typeof callback === 'function') {
+            callback(response);
+          }
+        } catch (error) {
+          console.error('Error getting server time:', error);
+          if (typeof callback === 'function') {
+            callback({ error: 'Failed to get server time' });
+          }
+        }
+      });
 
     socket.on('reset-game', async ({ betAmount }) => {
       try { 
