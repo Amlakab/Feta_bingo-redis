@@ -343,4 +343,22 @@ router.get('/user/:userId', async (req: Request, res: Response) => {
   }
 });
 
+// Get current server time
+router.get('/current-time', async (req: Request, res: Response) => {
+  try {
+    const currentTime = Date.now();
+    
+    res.json({
+      serverTime: currentTime,
+      serverTimeISO: new Date(currentTime).toISOString(),
+      timestamp: currentTime,
+      timezone: 'UTC',
+      formatted: new Date(currentTime).toLocaleString()
+    });
+  } catch (error: any) {
+    console.error('Error getting server time:', error);
+    res.status(500).json({ error: 'Failed to get server time' });
+  }
+});
+
 export default router;
