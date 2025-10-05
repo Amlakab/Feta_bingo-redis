@@ -1,12 +1,12 @@
 // =============================
-// File: src/socket/setupSocket.ts (FULLY CORRECTED)
+// File: src/socket/setupSocket.ts (FIXED PRIZE POOL & PLAYER COUNT)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
 import User from '../models/User';
 import GameHistory from '../models/GameHistory';
 import GameSession, { IGameSession } from '../models/GameSession';
-import Games from '../models/Games'; // Import your Games model
+import Games from '../models/Games';
 
 interface AuthenticatedSocket extends Socket { userId?: string; }
 
@@ -36,7 +36,7 @@ const activeGames = new Map<number, GameState>();
 const betTimers = new Map<number, BetTimerState>();
 let globalTimerInterval: NodeJS.Timeout | null = null;
 
-// Initialize and start the global timer - COMPLETELY CORRECTED
+// Initialize and start the global timer - FIXED
 function startGlobalTimer(io: Server) {
   if (globalTimerInterval) {
     clearInterval(globalTimerInterval);
@@ -50,48 +50,59 @@ function startGlobalTimer(io: Server) {
       const newState = { ...currentState };
       let stateChanged = false;
 
-      // Check if there are active game sessions for this bet amount
-      const activeSessions = await GameSession.find({ 
+      // ALWAYS update player count and prize pool regardless of status
+      await updateBetTimerStats(betAmount);
+      
+      // Check if there are playing sessions for this bet amount (this determines in-progress status)
+      const playingSessions = await GameSession.find({ 
         betAmount, 
-        status: { $in: ['active', 'ready', 'playing'] } 
+        status: 'playing' 
       });
-      const hasPlayers = activeSessions.length > 0;
+      const hasPlayingGame = playingSessions.length > 0;
 
-      if (newState.status === 'ready') {
+      if (hasPlayingGame) {
+        // Game is in progress - set status to in-progress
+        if (newState.status !== 'in-progress') {
+          newState.status = 'in-progress';
+          newState.timer = 0;
+          stateChanged = true;
+          console.log(`Timer ${betAmount}: → IN-PROGRESS (game playing)`);
+        }
+      } else if (newState.status === 'ready') {
+        // Ready phase countdown
         if (newState.timer > 0) {
           newState.timer -= 1;
           stateChanged = true;
         }
         
         if (newState.timer <= 0) {
-          if (hasPlayers) {
-            // Players exist - stop timer and wait for game start
-            newState.status = 'in-progress';
-            newState.timer = 0;
-            console.log(`Timer ${betAmount}: Players found → IN-PROGRESS`);
-          } else {
-            // No players - move to active phase
-            newState.status = 'active';
-            newState.timer = 45;
-            newState.createdAt = new Date();
-            console.log(`Timer ${betAmount}: READY → ACTIVE (45s)`);
-          }
+          newState.status = 'active';
+          newState.timer = 45;
+          newState.createdAt = new Date();
           stateChanged = true;
+          console.log(`Timer ${betAmount}: READY → ACTIVE (45s)`);
         }
       } else if (newState.status === 'active') {
+        // Active phase countdown
         if (newState.timer > 0) {
           newState.timer -= 1;
           stateChanged = true;
         }
         
         if (newState.timer <= 0) {
-          if (hasPlayers) {
-            // Players joined during active phase - stop timer
-            newState.status = 'in-progress';
-            newState.timer = 0;
-            console.log(`Timer ${betAmount}: ACTIVE → IN-PROGRESS (players joined)`);
+          // Check if we have active sessions to potentially start a game
+          const activeSessions = await GameSession.find({ 
+            betAmount, 
+            status: { $in: ['active', 'ready'] } 
+          });
+          
+          if (activeSessions.length > 0) {
+            // Players are present but game hasn't started yet - restart active phase
+            newState.timer = 45;
+            newState.createdAt = new Date();
+            console.log(`Timer ${betAmount}: ACTIVE → ACTIVE (restart 45s - players waiting)`);
           } else {
-            // No players - restart cycle
+            // No players - go back to ready
             newState.status = 'ready';
             newState.timer = 5;
             newState.createdAt = null;
@@ -99,9 +110,13 @@ function startGlobalTimer(io: Server) {
           }
           stateChanged = true;
         }
-      } else if (newState.status === 'in-progress') {
-        // Timer doesn't count down during active games
-        // Game logic controls when to reset back to ready
+      } else if (newState.status === 'in-progress' && !hasPlayingGame) {
+        // Game ended - reset to ready
+        newState.status = 'ready';
+        newState.timer = 5;
+        newState.createdAt = null;
+        stateChanged = true;
+        console.log(`Timer ${betAmount}: IN-PROGRESS → READY (game ended)`);
       }
 
       if (stateChanged) {
@@ -118,7 +133,7 @@ function startGlobalTimer(io: Server) {
   console.log('Global timer started successfully');
 }
 
-// Initialize timers for all bet amounts - CORRECTED
+// Initialize timers for all bet amounts
 async function initializeBetTimers(io: Server) {
   try {
     // Read available bet amounts from database
@@ -132,7 +147,7 @@ async function initializeBetTimers(io: Server) {
     betAmounts.forEach((betAmount: number) => {
       betTimers.set(betAmount, {
         status: 'ready',
-        timer: 5, // Start with 5 seconds ready phase
+        timer: 5,
         playerCount: 0,
         prizePool: 0,
         createdAt: null
@@ -167,14 +182,15 @@ function broadcastTimerStates(io: Server) {
   io.emit('timer-states-update', timerStates);
 }
 
-// Update player count and prize pool - ENHANCED
+// Update player count and prize pool - FIXED to include ALL session statuses
 async function updateBetTimerStats(betAmount: number) {
   try {
-    const sessions = await GameSession.find({ 
+    // Count ALL sessions regardless of status (active, ready, playing)
+    const allSessions = await GameSession.find({ 
       betAmount, 
       status: { $in: ['active', 'ready', 'playing'] } 
     });
-    const playerCount = sessions.length;
+    const playerCount = allSessions.length;
     
     if (!betTimers.has(betAmount)) {
       betTimers.set(betAmount, {
@@ -190,6 +206,7 @@ async function updateBetTimerStats(betAmount: number) {
     if (timerState) {
       timerState.playerCount = playerCount;
       timerState.prizePool = playerCount * betAmount * 0.8;
+      console.log(`Updated stats for ${betAmount}: ${playerCount} players, prize: ${timerState.prizePool}`);
     }
   } catch (error) {
     console.error('Error updating bet timer stats:', error);
@@ -206,14 +223,13 @@ function setBetTimerInProgress(betAmount: number) {
   }
 }
 
-// Reset bet timer when game ends - CORRECTED
+// Reset bet timer when game ends
 function resetBetTimer(betAmount: number) {
   const timerState = betTimers.get(betAmount);
   if (timerState) {
     timerState.status = 'ready';
     timerState.timer = 5;
     timerState.createdAt = null;
-    // Don't reset playerCount and prizePool - they'll be updated by updateBetTimerStats
     console.log(`Timer ${betAmount} reset to READY (game ended)`);
   }
 }
@@ -375,6 +391,8 @@ function endGameCompletely(io: Server, betAmount: number) {
     }
     
     resetBetTimer(betAmount);
+    // Update stats after game ends
+    updateBetTimerStats(betAmount);
     broadcastTimerStates(io);
   }
 }
@@ -574,6 +592,7 @@ export function setupSocket(io: Server) {
     });
 
     // === Create session ===
+   // === Create session ===
     socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
       try {
         const { userId, cardNumber, betAmount, createdAt } = data;
