@@ -98,13 +98,12 @@ function startGlobalTimer(io: Server) {
           
           if (activeSessions.length > 0) {
 
-             await GameSession.deleteMany({ betAmount });
-              console.log(`Deleted sessions for betAmount: ${betAmount}`);
+            //  await GameSession.deleteMany({ betAmount });
+            //   console.log(`Deleted sessions for betAmount: ${betAmount}`);
 
-
-              newState.playerCount = 0;
-              newState.prizePool = 0;
-              console.log(`Reset player count and prize pool to 0 for betAmount: ${betAmount}`);
+            //   newState.playerCount = 0;
+            //   newState.prizePool = 0;
+            //   console.log(`Reset player count and prize pool to 0 for betAmount: ${betAmount}`);
             
             // Players are present but game hasn't started yet - restart active phase
             newState.timer = 45;
@@ -114,14 +113,7 @@ function startGlobalTimer(io: Server) {
             
           } else {
 
-            // if(activeSessions.length < 3) {
-            //   await GameSession.deleteMany({ betAmount });
-            //   console.log(`Deleted sessions for betAmount: ${betAmount}`);
-
-            //   newState.playerCount = 0;
-            //   newState.prizePool = 0;
-            //   console.log(`Reset player count and prize pool to 0 for betAmount: ${betAmount}`);
-            // }
+          
             // No players - go back to ready
             newState.status = 'ready';
             newState.timer = 5;
@@ -780,7 +772,13 @@ export function setupSocket(io: Server) {
       { $set: { status: status } } // Use $set operator for clarity
     );
 
-    // 2. Find only the documents that were just updated (now have the new status)
+    // 2. Delete sessions with status 'active' and same betAmount
+    const deleteResult = await GameSession.deleteMany({
+      betAmount,
+      status: 'active'
+    });
+
+    // 3. Find only the documents that were just updated (now have the new status)
     const updatedSessions = await GameSession.find({
       betAmount,
       status: status // This finds documents with the NEW status
