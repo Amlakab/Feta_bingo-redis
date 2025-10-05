@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (FIXED PRIZE POOL & PLAYER COUNT)
+// File: src/socket/setupSocket.ts (FIXED DATA CONSISTENCY)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -36,7 +36,7 @@ const activeGames = new Map<number, GameState>();
 const betTimers = new Map<number, BetTimerState>();
 let globalTimerInterval: NodeJS.Timeout | null = null;
 
-// Initialize and start the global timer - FIXED
+// Initialize and start the global timer
 function startGlobalTimer(io: Server) {
   if (globalTimerInterval) {
     clearInterval(globalTimerInterval);
@@ -133,8 +133,8 @@ function startGlobalTimer(io: Server) {
   console.log('Global timer started successfully');
 }
 
-// CORRECTED: Always recalculate from database - never trust cached values
-async function updateBetTimerStats(betAmount: number) {
+// CORRECTED: Enhanced function with immediate broadcast capability
+async function updateBetTimerStats(betAmount: number, io?: Server) {
   try {
     // ALWAYS count from database - never use cached values
     const allSessions = await GameSession.find({ 
@@ -157,13 +157,45 @@ async function updateBetTimerStats(betAmount: number) {
     }
     
     const timerState = betTimers.get(betAmount)!;
+    
+    // Check if values actually changed to avoid unnecessary broadcasts
+    const valuesChanged = 
+      timerState.playerCount !== playerCount || 
+      timerState.prizePool !== prizePool;
+    
     timerState.playerCount = playerCount;
     timerState.prizePool = prizePool;
     
     console.log(`✅ Updated stats for ${betAmount}: ${playerCount} players, prize: ${prizePool}`);
     
+    // Broadcast changes immediately if values changed and IO instance provided
+    if (valuesChanged && io) {
+      console.log(`📢 Broadcasting immediate update for ${betAmount}`);
+      broadcastTimerStates(io);
+    }
+    
+    return valuesChanged;
+    
   } catch (error) {
     console.error('❌ Error updating bet timer stats:', error);
+    return false;
+  }
+}
+
+// NEW: Centralized function for session cleanup with guaranteed stats update
+async function cleanupSessionsAndUpdateStats(io: Server, betAmount: number, filter: any = {}) {
+  try {
+    // Delete sessions based on filter
+    const deleteResult = await GameSession.deleteMany(filter);
+    console.log(`🧹 Cleaned up sessions for ${betAmount}:`, deleteResult.deletedCount, 'sessions removed');
+    
+    // FORCE stats update and broadcast
+    await updateBetTimerStats(betAmount, io);
+    
+    return deleteResult.deletedCount;
+  } catch (error) {
+    console.error('Error in cleanupSessionsAndUpdateStats:', error);
+    return 0;
   }
 }
 
@@ -347,11 +379,9 @@ async function handleNoWinnerGame(io: Server, betAmount: number) {
   endGameCompletely(io, betAmount);
   
   try {
-    await GameSession.deleteMany({ betAmount });
+    // Use centralized cleanup function instead of direct deletion
+    await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount });
     console.log(`Deleted all sessions for betAmount: ${betAmount} (no winner)`);
-    
-    // Update player count after deletion
-    await updateBetTimerStats(betAmount);
     
     io.emit('game-ended', {
       winners: [],
@@ -395,8 +425,7 @@ function endGameCompletely(io: Server, betAmount: number) {
     
     resetBetTimer(betAmount);
     // Update stats after game ends
-    updateBetTimerStats(betAmount);
-    broadcastTimerStates(io);
+    updateBetTimerStats(betAmount, io); // Added io parameter
   }
 }
 
@@ -470,11 +499,9 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     const sessions = await GameSession.find({ betAmount });
     const numberOfPlayers = sessions.length;
 
-    await GameSession.deleteMany({ betAmount });
+    // Use centralized cleanup function instead of direct deletion
+    await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount });
     console.log(`Deleted sessions for betAmount: ${betAmount}`);
-
-    // Update player count after game ends
-    await updateBetTimerStats(betAmount);
 
     let prizePerWinner = 0;
     if (winners.length > 0) {
@@ -616,15 +643,12 @@ export function setupSocket(io: Server) {
           createdAt: new Date().toISOString()
         });
 
-        // ✅ FIXED: Update stats immediately after creating session
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use enhanced update function with broadcast
+        await updateBetTimerStats(betAmount, io);
 
         const populatedCreated = (await enrichWithUserPhones([created]))[0];
         const allSessions = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         const enrichedAll = await enrichWithUserPhones(allSessions);
-
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
 
         io.emit('session-created', populatedCreated);
         io.emit('sessions-updated', enrichedAll);
@@ -648,10 +672,8 @@ export function setupSocket(io: Server) {
 
         const user = await User.findById(userId);
 
-        await GameSession.deleteMany({ betAmount, userId });
-        
-        // ✅ FIXED: Update stats immediately after deletion
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use centralized cleanup function
+        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
         
         // Only stop game if this user was participating
         const gameState = activeGames.get(betAmount);
@@ -664,9 +686,6 @@ export function setupSocket(io: Server) {
 
         const updatedSessions = await GameSession.find({ status: { $in: ['active','ready'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to clear selected' });
@@ -685,10 +704,8 @@ export function setupSocket(io: Server) {
         const user = await User.findById(userId);
         if (user) { (user as any).wallet += totalRefund; await user.save(); }
 
-        await GameSession.deleteMany({ betAmount, userId });
-        
-        // ✅ FIXED: Update stats immediately after deletion
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use centralized cleanup function
+        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
         
         // Only affect game if it's active
         const gameState = activeGames.get(betAmount);
@@ -701,9 +718,6 @@ export function setupSocket(io: Server) {
 
         const updatedSessions = await GameSession.find({ status: { $in: ['active','playing','ready'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to refund wallet' });
@@ -719,17 +733,15 @@ export function setupSocket(io: Server) {
         if (!session) return socket.emit('error', { message: 'Session not found' });
 
         const user = await User.findById(socket.userId);
-        await GameSession.findByIdAndDelete(session._id);
-
-        // ✅ FIXED: Update stats immediately after deletion
-        await updateBetTimerStats(betAmount);
+        
+        // ✅ FIXED: Use centralized cleanup function
+        await cleanupSessionsAndUpdateStats(io, betAmount, { 
+          cardNumber, betAmount, userId: socket.userId 
+        });
 
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to delete session' });
@@ -741,14 +753,11 @@ export function setupSocket(io: Server) {
       try {
         await GameSession.updateOne({ cardNumber, betAmount }, { status });
         
-        // ✅ FIXED: Update stats immediately after modification
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use enhanced update function with broadcast
+        await updateBetTimerStats(betAmount, io);
         
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update session' });
@@ -769,8 +778,8 @@ export function setupSocket(io: Server) {
           status: 'active'
         });
 
-        // ✅ FIXED: Update stats immediately after modification
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use enhanced update function with broadcast
+        await updateBetTimerStats(betAmount, io);
 
         // 3. Find only the documents that were just updated (now have the new status)
         const updatedSessions = await GameSession.find({
@@ -780,9 +789,6 @@ export function setupSocket(io: Server) {
 
         // 4. Emit the list of updated sessions
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
 
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
@@ -793,14 +799,11 @@ export function setupSocket(io: Server) {
       try {
         await GameSession.updateMany({ userId, betAmount }, { status });
         
-        // ✅ FIXED: Update stats immediately after modification
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use enhanced update function with broadcast
+        await updateBetTimerStats(betAmount, io);
         
         const updated = await GameSession.find({ betAmount, status: { $in: ['ready','active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update session by user+bet' });
@@ -811,14 +814,11 @@ export function setupSocket(io: Server) {
       try {
         await GameSession.updateMany({ betAmount, status: 'ready' }, { status });
         
-        // ✅ FIXED: Update stats immediately after modification
-        await updateBetTimerStats(betAmount);
+        // ✅ FIXED: Use enhanced update function with broadcast
+        await updateBetTimerStats(betAmount, io);
         
         const updated = await GameSession.find({ status: { $in: ['active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
-        
-        // ✅ FIXED: Broadcast updated timer states
-        broadcastTimerStates(io);
         
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update ready sessions' });
@@ -954,7 +954,7 @@ export function setupSocket(io: Server) {
         stopGameCalling(betAmount); 
         endGameCompletely(io,betAmount);
         activeGames.delete(betAmount); 
-        await GameSession.deleteMany({ betAmount }); 
+        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount }); // ✅ FIXED
       } catch (error: any) { socket.emit('error', { message: error.message }); }
     });
 
@@ -963,7 +963,7 @@ export function setupSocket(io: Server) {
         stopGameCalling(betAmount); 
         endGameCompletely(io,betAmount);
         activeGames.delete(betAmount); 
-        await GameSession.deleteMany({ betAmount }); 
+        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount }); // ✅ FIXED
       } catch (error: any) { socket.emit('error', { message: error.message }); }
     });
 
@@ -971,5 +971,5 @@ export function setupSocket(io: Server) {
     socket.on('error', (error) => console.error('Socket error:', error));
   });
 
-  console.log('Socket.io server setup complete with corrected server-side timing control');
+  console.log('Socket.io server setup complete with corrected data synchronization');
 }
