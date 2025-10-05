@@ -646,6 +646,7 @@ export function setupSocket(io: Server) {
     // and then call broadcastTimerStates(io)
 
     // Example for clear-selected:
+// === Clear selected ===
     socket.on('clear-selected', async ({ betAmount, userId }) => {
       try {
         if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
@@ -662,18 +663,12 @@ export function setupSocket(io: Server) {
 
         await GameSession.deleteMany({ betAmount, userId });
         
-        // Update player count for timer
-        await updateBetTimerStats(betAmount);
-        
         // Only stop game if this user was participating
         const gameState = activeGames.get(betAmount);
         if (gameState) {
           stopGameCalling(betAmount);
           endGameCompletely(io, betAmount);
         }
-
-        // Broadcast updated timer states
-        broadcastTimerStates(io);
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
@@ -684,13 +679,130 @@ export function setupSocket(io: Server) {
       }
     });
 
-    // Similar updates needed for:
-    // - refund-wallet
-    // - delete-session  
-    // - update-session-status
-    // - update-session-status-by-bet
-    // - update-session-status-by-user-bet
-    // - update-ready-sessions-by-bet
+    // === Refund Wallet ===
+    socket.on('refund-wallet', async ({ betAmount, userId }) => {
+      try {
+        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
+
+        const sessions = await GameSession.find({ betAmount, userId, status: 'ready' });
+        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
+
+        const totalRefund = betAmount * sessions.length;
+        const user = await User.findById(userId);
+        if (user) { (user as any).wallet += totalRefund; await user.save(); }
+
+        await GameSession.deleteMany({ betAmount, userId });
+        
+        // Only affect game if it's active
+        const gameState = activeGames.get(betAmount);
+        if (gameState && !gameState.isGameEnded) {
+          stopGameCalling(betAmount);
+          endGameCompletely(io, betAmount);
+        }
+
+        socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+
+        const updatedSessions = await GameSession.find({ status: { $in: ['active','playing','ready'] } });
+        io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to refund wallet' });
+      }
+    });
+
+    // === Fund Wallet ===
+    socket.on('fund-wallet', async ({ betAmount, userId }) => {
+      try {
+        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
+
+        const sessions = await GameSession.find({ betAmount, userId, status: 'active' });
+        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
+
+        const totalAmount = betAmount * sessions.length;
+        const user = await User.findById(userId);
+        if (!user) return socket.emit('error', { message: 'User not found' });
+
+        if ((user as any).wallet < totalAmount) return socket.emit('error', { message: 'Insufficient balance' });
+
+        (user as any).wallet -= totalAmount;
+        await user.save();
+
+        socket.emit('wallet-updated', (user as any).wallet);
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to fund wallet' });
+      }
+    });
+
+    // === Delete session ===
+    socket.on('delete-session', async ({ cardNumber, betAmount }) => {
+      try {
+        if (!socket.userId) return socket.emit('error', { message: 'Unauthorized' });
+
+        const session = await GameSession.findOne({ cardNumber, betAmount, userId: socket.userId });
+        if (!session) return socket.emit('error', { message: 'Session not found' });
+
+        const user = await User.findById(socket.userId);
+        await GameSession.findByIdAndDelete(session._id);
+
+        const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
+        socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+        io.emit('sessions-updated', await enrichWithUserPhones(updated));
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to delete session' });
+      }
+    });
+
+    // === Update session status ===
+    socket.on('update-session-status', async ({ cardNumber, betAmount, status }) => {
+      try {
+        await GameSession.updateOne({ cardNumber, betAmount }, { status });
+        const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
+        io.emit('sessions-updated', await enrichWithUserPhones(updated));
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update session' });
+      }
+    });
+
+    socket.on('update-session-status-by-bet', async ({ betAmount, status }) => {
+  try {
+    // 1. Perform the update only on documents with status 'ready'
+    const updateResult = await GameSession.updateMany(
+      { betAmount, status: 'ready' },
+      { $set: { status: status } } // Use $set operator for clarity
+    );
+
+    // 2. Find only the documents that were just updated (now have the new status)
+    const updatedSessions = await GameSession.find({
+      betAmount,
+      status: status // This finds documents with the NEW status
+    });
+
+    // 3. Emit the list of updated sessions
+    io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+
+  } catch (error: any) {
+    socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
+  }
+});
+
+    socket.on('update-session-status-by-user-bet', async ({ userId, betAmount, status }) => {
+      try {
+        await GameSession.updateMany({ userId, betAmount }, { status });
+        const updated = await GameSession.find({ betAmount, status: { $in: ['ready','active','playing'] } });
+        io.emit('sessions-updated', await enrichWithUserPhones(updated));
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update session by user+bet' });
+      }
+    });
+
+    socket.on('update-ready-sessions-by-bet', async ({ betAmount, status }) => {
+      try {
+        await GameSession.updateMany({ betAmount, status: 'ready' }, { status });
+        const updated = await GameSession.find({ status: { $in: ['active','playing'] } });
+        io.emit('sessions-updated', await enrichWithUserPhones(updated));
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update ready sessions' });
+      }
+    });
 
     // === Game control ===
     socket.on('start-game', ({ betAmount }) => {
@@ -768,7 +880,73 @@ export function setupSocket(io: Server) {
       }
     });
 
+
     // Remove get-remaining-time endpoint since we're handling timing completely on server
+    socket.on('get-remaining-time', async ({ betAmount }) => {
+      try {
+        // Find the earliest active session for this bet amount
+        const earliestSession = await GameSession.findOne({
+          betAmount,
+          status: { $in: ['active', 'ready'] }
+        }).sort({ createdAt: 1 });
+
+        if (!earliestSession) {
+          // No active sessions, return initial time (45 seconds)
+          socket.emit('remaining-time', { betAmount, remainingTime: 45 });
+          return;
+        }
+
+        // Calculate remaining time based on the earliest session
+        const sessionStartTime = new Date(earliestSession.createdAt).getTime();
+        const currentTime = new Date().getTime();
+        const elapsedSeconds = Math.floor((currentTime - sessionStartTime) / 1000);
+        const remainingTime = Math.max(0, 45 - elapsedSeconds);
+
+        socket.emit('remaining-time', { betAmount, remainingTime });
+      } catch (error: any) {
+        console.error('Error calculating remaining time:', error);
+        socket.emit('error', { message: 'Failed to calculate remaining time' });
+      }
+    });
+
+    // Add this inside your io.on('connection') handler in setupSocket.ts
+      socket.on('get-server-time', (callback) => {
+        try {
+          const serverTime = Date.now();
+          const response = {
+            serverTime: serverTime,
+            serverTimeISO: new Date(serverTime).toISOString()
+          };
+          
+          if (typeof callback === 'function') {
+            callback(response);
+          }
+        } catch (error) {
+          console.error('Error getting server time:', error);
+          if (typeof callback === 'function') {
+            callback({ error: 'Failed to get server time' });
+          }
+        }
+      });
+
+    socket.on('reset-game', async ({ betAmount }) => {
+      try { 
+        stopGameCalling(betAmount); 
+        endGameCompletely(io,betAmount);
+        activeGames.delete(betAmount); 
+        await GameSession.deleteMany({ betAmount }); 
+      } catch (error: any) { socket.emit('error', { message: error.message }); }
+    });
+
+    socket.on('test-game', async ({ betAmount }) => {
+      try { 
+        stopGameCalling(betAmount); 
+        endGameCompletely(io,betAmount);
+        activeGames.delete(betAmount); 
+        await GameSession.deleteMany({ betAmount }); 
+      } catch (error: any) { socket.emit('error', { message: error.message }); }
+    });
+
     socket.on('disconnect', (reason) => console.log('Client disconnected:', socket.id, 'Reason:', reason));
     socket.on('error', (error) => console.error('Socket error:', error));
   });
