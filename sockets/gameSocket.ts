@@ -97,6 +97,10 @@ function startGlobalTimer(io: Server) {
           });
           
           if (activeSessions.length > 0) {
+            if(activeSessions.length < 3) {
+              await GameSession.deleteMany({ betAmount });
+              console.log(`Deleted sessions for betAmount: ${betAmount}`);
+            }
             // Players are present but game hasn't started yet - restart active phase
             newState.timer = 45;
             newState.createdAt = new Date();
