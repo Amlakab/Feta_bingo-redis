@@ -98,6 +98,10 @@ function startGlobalTimer(io: Server) {
           
           if (activeSessions.length > 0) {
 
+             await GameSession.deleteMany({ betAmount });
+              console.log(`Deleted sessions for betAmount: ${betAmount}`);
+
+
               newState.playerCount = 0;
               newState.prizePool = 0;
               console.log(`Reset player count and prize pool to 0 for betAmount: ${betAmount}`);
@@ -107,9 +111,7 @@ function startGlobalTimer(io: Server) {
             newState.createdAt = new Date();
             console.log(`Timer ${betAmount}: ACTIVE → ACTIVE (restart 45s - players waiting)`);
 
-            await GameSession.deleteMany({ betAmount });
-              console.log(`Deleted sessions for betAmount: ${betAmount}`);
-
+            
           } else {
 
             // if(activeSessions.length < 3) {
