@@ -97,23 +97,11 @@ function startGlobalTimer(io: Server) {
           });
           
           if (activeSessions.length > 0) {
-
-            //  await GameSession.deleteMany({ betAmount });
-            //   console.log(`Deleted sessions for betAmount: ${betAmount}`);
-
-            //   newState.playerCount = 0;
-            //   newState.prizePool = 0;
-            //   console.log(`Reset player count and prize pool to 0 for betAmount: ${betAmount}`);
-            
             // Players are present but game hasn't started yet - restart active phase
             newState.timer = 45;
             newState.createdAt = new Date();
             console.log(`Timer ${betAmount}: ACTIVE → ACTIVE (restart 45s - players waiting)`);
-
-            
           } else {
-
-          
             // No players - go back to ready
             newState.status = 'ready';
             newState.timer = 5;
@@ -143,6 +131,40 @@ function startGlobalTimer(io: Server) {
   }, 1000);
 
   console.log('Global timer started successfully');
+}
+
+// CORRECTED: Always recalculate from database - never trust cached values
+async function updateBetTimerStats(betAmount: number) {
+  try {
+    // ALWAYS count from database - never use cached values
+    const allSessions = await GameSession.find({ 
+      betAmount, 
+      status: { $in: ['active', 'ready', 'playing'] } 
+    });
+    
+    const playerCount = allSessions.length;
+    const prizePool = playerCount * betAmount * 0.8;
+    
+    // ALWAYS update the timer state with fresh data
+    if (!betTimers.has(betAmount)) {
+      betTimers.set(betAmount, {
+        status: 'ready',
+        timer: 5,
+        playerCount: 0,
+        prizePool: 0,
+        createdAt: null
+      });
+    }
+    
+    const timerState = betTimers.get(betAmount)!;
+    timerState.playerCount = playerCount;
+    timerState.prizePool = prizePool;
+    
+    console.log(`✅ Updated stats for ${betAmount}: ${playerCount} players, prize: ${prizePool}`);
+    
+  } catch (error) {
+    console.error('❌ Error updating bet timer stats:', error);
+  }
 }
 
 // Initialize timers for all bet amounts
@@ -192,37 +214,6 @@ function broadcastTimerStates(io: Server) {
   
   console.log('Broadcasting timer states:', timerStates);
   io.emit('timer-states-update', timerStates);
-}
-
-// Update player count and prize pool - FIXED to include ALL session statuses
-async function updateBetTimerStats(betAmount: number) {
-  try {
-    // Count ALL sessions regardless of status (active, ready, playing)
-    const allSessions = await GameSession.find({ 
-      betAmount, 
-      status: { $in: ['active', 'ready', 'playing'] } 
-    });
-    const playerCount = allSessions.length;
-    
-    if (!betTimers.has(betAmount)) {
-      betTimers.set(betAmount, {
-        status: 'ready',
-        timer: 5,
-        playerCount: 0,
-        prizePool: 0,
-        createdAt: null
-      });
-    }
-    
-    const timerState = betTimers.get(betAmount);
-    if (timerState) {
-      timerState.playerCount = playerCount;
-      timerState.prizePool = playerCount * betAmount * 0.8;
-      console.log(`Updated stats for ${betAmount}: ${playerCount} players, prize: ${timerState.prizePool}`);
-    }
-  } catch (error) {
-    console.error('Error updating bet timer stats:', error);
-  }
 }
 
 // Set bet timer to in-progress when game starts
@@ -604,7 +595,6 @@ export function setupSocket(io: Server) {
     });
 
     // === Create session ===
-   // === Create session ===
     socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
       try {
         const { userId, cardNumber, betAmount, createdAt } = data;
@@ -626,14 +616,14 @@ export function setupSocket(io: Server) {
           createdAt: new Date().toISOString()
         });
 
-        // Update player count after creating session
+        // ✅ FIXED: Update stats immediately after creating session
         await updateBetTimerStats(betAmount);
 
         const populatedCreated = (await enrichWithUserPhones([created]))[0];
         const allSessions = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         const enrichedAll = await enrichWithUserPhones(allSessions);
 
-        // Broadcast updated timer states
+        // ✅ FIXED: Broadcast updated timer states
         broadcastTimerStates(io);
 
         io.emit('session-created', populatedCreated);
@@ -643,12 +633,7 @@ export function setupSocket(io: Server) {
       }
     });
 
-    // Rest of your socket event handlers (clear-selected, refund-wallet, etc.)
-    // These should all call updateBetTimerStats(betAmount) after modifying sessions
-    // and then call broadcastTimerStates(io)
-
-    // Example for clear-selected:
-// === Clear selected ===
+    // === Clear selected ===
     socket.on('clear-selected', async ({ betAmount, userId }) => {
       try {
         if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
@@ -665,6 +650,9 @@ export function setupSocket(io: Server) {
 
         await GameSession.deleteMany({ betAmount, userId });
         
+        // ✅ FIXED: Update stats immediately after deletion
+        await updateBetTimerStats(betAmount);
+        
         // Only stop game if this user was participating
         const gameState = activeGames.get(betAmount);
         if (gameState) {
@@ -676,6 +664,10 @@ export function setupSocket(io: Server) {
 
         const updatedSessions = await GameSession.find({ status: { $in: ['active','ready'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to clear selected' });
       }
@@ -695,6 +687,9 @@ export function setupSocket(io: Server) {
 
         await GameSession.deleteMany({ betAmount, userId });
         
+        // ✅ FIXED: Update stats immediately after deletion
+        await updateBetTimerStats(betAmount);
+        
         // Only affect game if it's active
         const gameState = activeGames.get(betAmount);
         if (gameState && !gameState.isGameEnded) {
@@ -706,31 +701,12 @@ export function setupSocket(io: Server) {
 
         const updatedSessions = await GameSession.find({ status: { $in: ['active','playing','ready'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to refund wallet' });
-      }
-    });
-
-    // === Fund Wallet ===
-    socket.on('fund-wallet', async ({ betAmount, userId }) => {
-      try {
-        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
-
-        const sessions = await GameSession.find({ betAmount, userId, status: 'active' });
-        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
-
-        const totalAmount = betAmount * sessions.length;
-        const user = await User.findById(userId);
-        if (!user) return socket.emit('error', { message: 'User not found' });
-
-        if ((user as any).wallet < totalAmount) return socket.emit('error', { message: 'Insufficient balance' });
-
-        (user as any).wallet -= totalAmount;
-        await user.save();
-
-        socket.emit('wallet-updated', (user as any).wallet);
-      } catch (error: any) {
-        socket.emit('error', { message: error.message || 'Failed to fund wallet' });
       }
     });
 
@@ -745,9 +721,16 @@ export function setupSocket(io: Server) {
         const user = await User.findById(socket.userId);
         await GameSession.findByIdAndDelete(session._id);
 
+        // ✅ FIXED: Update stats immediately after deletion
+        await updateBetTimerStats(betAmount);
+
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to delete session' });
       }
@@ -757,46 +740,68 @@ export function setupSocket(io: Server) {
     socket.on('update-session-status', async ({ cardNumber, betAmount, status }) => {
       try {
         await GameSession.updateOne({ cardNumber, betAmount }, { status });
+        
+        // ✅ FIXED: Update stats immediately after modification
+        await updateBetTimerStats(betAmount);
+        
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update session' });
       }
     });
 
     socket.on('update-session-status-by-bet', async ({ betAmount, status }) => {
-  try {
-    // 1. Perform the update only on documents with status 'ready'
-    const updateResult = await GameSession.updateMany(
-      { betAmount, status: 'ready' },
-      { $set: { status: status } } // Use $set operator for clarity
-    );
+      try {
+        // 1. Perform the update only on documents with status 'ready'
+        const updateResult = await GameSession.updateMany(
+          { betAmount, status: 'ready' },
+          { $set: { status: status } }
+        );
 
-    // 2. Delete sessions with status 'active' and same betAmount
-    const deleteResult = await GameSession.deleteMany({
-      betAmount,
-      status: 'active'
+        // 2. Delete sessions with status 'active' and same betAmount
+        const deleteResult = await GameSession.deleteMany({
+          betAmount,
+          status: 'active'
+        });
+
+        // ✅ FIXED: Update stats immediately after modification
+        await updateBetTimerStats(betAmount);
+
+        // 3. Find only the documents that were just updated (now have the new status)
+        const updatedSessions = await GameSession.find({
+          betAmount,
+          status: status
+        });
+
+        // 4. Emit the list of updated sessions
+        io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
+      }
     });
-
-    // 3. Find only the documents that were just updated (now have the new status)
-    const updatedSessions = await GameSession.find({
-      betAmount,
-      status: status // This finds documents with the NEW status
-    });
-
-    // 3. Emit the list of updated sessions
-    io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-
-  } catch (error: any) {
-    socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
-  }
-});
 
     socket.on('update-session-status-by-user-bet', async ({ userId, betAmount, status }) => {
       try {
         await GameSession.updateMany({ userId, betAmount }, { status });
+        
+        // ✅ FIXED: Update stats immediately after modification
+        await updateBetTimerStats(betAmount);
+        
         const updated = await GameSession.find({ betAmount, status: { $in: ['ready','active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update session by user+bet' });
       }
@@ -805,8 +810,16 @@ export function setupSocket(io: Server) {
     socket.on('update-ready-sessions-by-bet', async ({ betAmount, status }) => {
       try {
         await GameSession.updateMany({ betAmount, status: 'ready' }, { status });
+        
+        // ✅ FIXED: Update stats immediately after modification
+        await updateBetTimerStats(betAmount);
+        
         const updated = await GameSession.find({ status: { $in: ['active','playing'] } });
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
+        
+        // ✅ FIXED: Broadcast updated timer states
+        broadcastTimerStates(io);
+        
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to update ready sessions' });
       }
@@ -887,7 +900,6 @@ export function setupSocket(io: Server) {
         socket.emit('error', { message: error.message || 'Failed to get timer states' });
       }
     });
-
 
     // Remove get-remaining-time endpoint since we're handling timing completely on server
     socket.on('get-remaining-time', async ({ betAmount }) => {
