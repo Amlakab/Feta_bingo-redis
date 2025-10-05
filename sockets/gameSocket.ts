@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (FULLY CORRECTED VERSION)
+// File: src/socket/setupSocket.ts (SERVER-SIDE TIMING VERSION)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -19,11 +19,165 @@ interface GameState {
   isGameEnded: boolean;
   pendingWinners: Array<{userId: string; card: number}>;
   gracePeriodTimer?: NodeJS.Timeout;
-  gracePeriodActive: boolean; // NEW: Track if grace period is active
+  gracePeriodActive: boolean;
+}
+
+// ---- Server-side Timing Control ----
+interface BetTimerState {
+  status: 'ready' | 'active' | 'in-progress';
+  timer: number;
+  interval?: NodeJS.Timeout;
+  playerCount: number;
+  prizePool: number;
+  createdAt: Date | null;
 }
 
 const activeGames = new Map<number, GameState>();
+const betTimers = new Map<number, BetTimerState>();
 
+// Initialize timers for all bet amounts
+async function initializeBetTimers() {
+  try {
+    // You'll need to import your Games model
+    const Games = require('../models/Games'); // Adjust path as needed
+    const games = await Games.find().sort({ createdAt: -1 });
+    
+    games.forEach((game: any) => {
+      betTimers.set(game.betAmount, {
+        status: 'ready',
+        timer: 5, // Start with 5s ready period
+        playerCount: 0,
+        prizePool: 0,
+        createdAt: null
+      });
+      
+      // Start the timer for this bet amount
+      startBetTimer(game.betAmount);
+    });
+    
+    console.log(`Initialized timers for ${games.length} bet amounts`);
+  } catch (error) {
+    console.error('Error initializing bet timers:', error);
+  }
+}
+
+// Start timer for a specific bet amount
+function startBetTimer(betAmount: number) {
+  // Clear existing interval if any
+  const existingTimer = betTimers.get(betAmount);
+  if (existingTimer && existingTimer.interval) {
+    clearInterval(existingTimer.interval);
+  }
+
+  const interval = setInterval(() => {
+    const timerState = betTimers.get(betAmount);
+    if (!timerState) return;
+
+    const newTimerState = { ...timerState };
+    
+    // Update timer based on current status
+    if (newTimerState.status === 'ready') {
+      newTimerState.timer -= 1;
+      
+      if (newTimerState.timer <= 0) {
+        // Transition from ready to active
+        newTimerState.status = 'active';
+        newTimerState.timer = 45; // 45 seconds active period
+        newTimerState.createdAt = new Date();
+        console.log(`Bet ${betAmount} transitioned to ACTIVE phase`);
+      }
+    } else if (newTimerState.status === 'active') {
+      newTimerState.timer -= 1;
+      
+      if (newTimerState.timer <= 0) {
+        // Check if game is in progress
+        const gameState = activeGames.get(betAmount);
+        if (gameState && !gameState.isGameEnded) {
+          // Game is in progress, don't reset timer
+          newTimerState.status = 'in-progress';
+          console.log(`Bet ${betAmount} is IN-PROGRESS, holding timer`);
+        } else {
+          // No game in progress, reset to ready
+          newTimerState.status = 'ready';
+          newTimerState.timer = 5;
+          newTimerState.createdAt = null;
+          newTimerState.playerCount = 0;
+          newTimerState.prizePool = 0;
+          console.log(`Bet ${betAmount} reset to READY phase`);
+        }
+      }
+    }
+    // For 'in-progress' status, we don't decrement timer
+    
+    betTimers.set(betAmount, newTimerState);
+    
+  }, 1000);
+
+  // Store the interval in the timer state
+  const currentState = betTimers.get(betAmount);
+  if (currentState) {
+    currentState.interval = interval;
+    betTimers.set(betAmount, currentState);
+  }
+}
+
+// Update player count and prize pool for a bet amount
+function updateBetTimerStats(betAmount: number, playerCount: number) {
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.playerCount = playerCount;
+    timerState.prizePool = playerCount * betAmount * 0.8;
+    betTimers.set(betAmount, timerState);
+  }
+}
+
+// Set bet timer to in-progress (when game starts)
+function setBetTimerInProgress(betAmount: number) {
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.status = 'in-progress';
+    betTimers.set(betAmount, timerState);
+    console.log(`Bet ${betAmount} timer set to IN-PROGRESS`);
+  }
+}
+
+// Reset bet timer to ready (when game ends)
+function resetBetTimer(betAmount: number) {
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.status = 'ready';
+    timerState.timer = 5;
+    timerState.createdAt = null;
+    betTimers.set(betAmount, timerState);
+    console.log(`Bet ${betAmount} timer reset to READY`);
+  }
+}
+
+// Get current timer state for a bet amount
+function getBetTimerState(betAmount: number) {
+  return betTimers.get(betAmount);
+}
+
+// Broadcast timer states to all clients
+function broadcastTimerStates(io: Server) {
+  const timerStates: {[key: number]: BetTimerState} = {};
+  betTimers.forEach((state, betAmount) => {
+    timerStates[betAmount] = { ...state };
+    // Don't send the interval to clients
+    delete (timerStates[betAmount] as any).interval;
+  });
+  
+  io.emit('timer-states-update', timerStates);
+}
+
+// Start broadcasting timer states periodically
+function startTimerBroadcast(io: Server) {
+  setInterval(() => {
+    broadcastTimerStates(io);
+  }, 1000); // Broadcast every second
+}
+
+// Existing bingo game functions (keep all your existing functions exactly as they are)
 function generateAllBingoNumbers(): string[] {
   const letters = ["B","I","N","G","O"];
   const ranges = [
@@ -50,6 +204,9 @@ function shuffleNumbers(numbers: string[]): string[] {
 }
 
 function startGameCalling(io: Server, betAmount: number) {
+  // Set timer to in-progress when game starts
+  setBetTimerInProgress(betAmount);
+  
   // Clear any existing interval for this bet amount
   if (activeGames.has(betAmount)) {
     const existingGame = activeGames.get(betAmount)!;
@@ -70,15 +227,21 @@ function startGameCalling(io: Server, betAmount: number) {
     isCalling: true,
     isGameEnded: false,
     pendingWinners: [],
-    gracePeriodActive: false // NEW: Initialize grace period as inactive
+    gracePeriodActive: false
   };
   
   activeGames.set(betAmount, gameState);
 
-  gameState.callingInterval = setInterval(() => {
+  gameState.callingInterval = setInterval(async () => {
     const game = activeGames.get(betAmount);
     if (!game || game.remainingNumbers.length === 0 || game.isGameEnded) {
       stopGameCalling(betAmount);
+      
+      // NEW: Handle case when all numbers are called but no winner
+      if (game && game.remainingNumbers.length === 0 && game.pendingWinners.length === 0) {
+        console.log(`All 75 numbers called with no winner for betAmount: ${betAmount}. Cleaning up sessions.`);
+        await handleNoWinnerGame(io, betAmount);
+      }
       return;
     }
     
@@ -92,10 +255,56 @@ function startGameCalling(io: Server, betAmount: number) {
       calledNumbers: game.calledNumbers 
     });
     
+    // NEW: Also check after calling the last number
     if (game.remainingNumbers.length === 0) {
       stopGameCalling(betAmount);
+      
+      // Handle case when all numbers are called but no winner
+      if (game.pendingWinners.length === 0) {
+        console.log(`All 75 numbers called with no winner for betAmount: ${betAmount}. Cleaning up sessions.`);
+        await handleNoWinnerGame(io, betAmount);
+      }
     }
   }, 5000);
+}
+
+// NEW: Function to handle games where all numbers are called but no winner
+async function handleNoWinnerGame(io: Server, betAmount: number) {
+  const gameState = activeGames.get(betAmount);
+  if (!gameState) return;
+
+  // End the game completely
+  endGameCompletely(betAmount);
+  
+  // Reset timer when game ends
+  resetBetTimer(betAmount);
+  
+  try {
+    // Delete all sessions for this bet amount
+    await GameSession.deleteMany({ betAmount });
+    console.log(`Deleted all sessions for betAmount: ${betAmount} (no winner)`);
+    
+    // Broadcast that the game ended with no winners
+    io.emit('game-ended', {
+      winners: [],
+      prizePool: 0,
+      split: 0,
+      totalWinners: 0,
+      betAmount: betAmount,
+      message: 'Game ended - all numbers called with no winner'
+    });
+    
+    // Emit empty sessions list
+    io.emit('sessions-updated', []);
+    
+    // Clear the game state
+    activeGames.delete(betAmount);
+    console.log(`Game state cleared for betAmount: ${betAmount} (no winner)`);
+    
+  } catch (error) {
+    console.error('Error handling no-winner game:', error);
+    io.emit('error', { message: 'Failed to clean up no-winner game' });
+  }
 }
 
 // FIXED: stopGameCalling only stops number calling, doesn't end game
@@ -121,6 +330,9 @@ function endGameCompletely(betAmount: number) {
       clearTimeout(g.gracePeriodTimer);
       g.gracePeriodTimer = undefined;
     }
+    
+    // Reset timer when game completely ends
+    resetBetTimer(betAmount);
   }
 }
 
@@ -201,7 +413,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
   console.log(`Finalizing game for betAmount: ${betAmount} with ${winners.length} winners`);
   
   try {
-
     const sessions = await GameSession.find({ betAmount });
     const numberOfPlayers = sessions.length;
 
@@ -283,6 +494,10 @@ async function enrichWithUserPhones(sessions: IGameSession[]) {
 }
 
 export function setupSocket(io: Server) {
+  // Initialize bet timers and start broadcasting
+  initializeBetTimers();
+  startTimerBroadcast(io);
+  
   io.use(async (socket: AuthenticatedSocket, next) => {
     try {
       const token = (socket.handshake as any).auth?.token || (socket.handshake.query as any).token;
@@ -294,6 +509,14 @@ export function setupSocket(io: Server) {
 
   io.on('connection', (socket: AuthenticatedSocket) => {
     console.log('Client connected:', socket.id, 'User:', socket.userId);
+
+    // Send current timer states to newly connected client
+    const timerStates: {[key: number]: BetTimerState} = {};
+    betTimers.forEach((state, betAmount) => {
+      timerStates[betAmount] = { ...state };
+      delete (timerStates[betAmount] as any).interval;
+    });
+    socket.emit('timer-states-update', timerStates);
 
     // === Fetch sessions ===
     socket.on('get-sessions', async (data: { betOptions?: number[]; betAmount?: number }) => {
@@ -307,6 +530,13 @@ export function setupSocket(io: Server) {
 
         const sessions = await GameSession.find(filter);
         const enriched = await enrichWithUserPhones(sessions);
+        
+        // Update player counts for timers
+        sessions.forEach(session => {
+          const playerCount = sessions.filter(s => s.betAmount === session.betAmount).length;
+          updateBetTimerStats(session.betAmount, playerCount);
+        });
+        
         socket.emit('sessions-updated', enriched);
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to get sessions' });
@@ -314,8 +544,7 @@ export function setupSocket(io: Server) {
     });
 
     // === Create session ===
-    // === Create session ===
-      socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
+    socket.on('create-session', async (data: { userId: string; cardNumber: number; betAmount: number; createdAt?: string }) => {
       try {
         const { userId, cardNumber, betAmount, createdAt } = data;
         if (userId !== socket.userId) return socket.emit('error', { message: 'Unauthorized' });
@@ -333,6 +562,10 @@ export function setupSocket(io: Server) {
         const populatedCreated = (await enrichWithUserPhones([created]))[0];
         const allSessions = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         const enrichedAll = await enrichWithUserPhones(allSessions);
+
+        // Update player count for timer
+        const playerCount = allSessions.filter(s => s.betAmount === betAmount).length;
+        updateBetTimerStats(betAmount, playerCount);
 
         io.emit('session-created', populatedCreated);
         io.emit('sessions-updated', enrichedAll);
@@ -357,6 +590,10 @@ export function setupSocket(io: Server) {
         const user = await User.findById(userId);
 
         await GameSession.deleteMany({ betAmount, userId });
+        
+        // Update player count for timer
+        const remainingSessions = await GameSession.find({ betAmount });
+        updateBetTimerStats(betAmount, remainingSessions.length);
         
         // Only stop game if this user was participating
         const gameState = activeGames.get(betAmount);
@@ -387,6 +624,10 @@ export function setupSocket(io: Server) {
         if (user) { (user as any).wallet += totalRefund; await user.save(); }
 
         await GameSession.deleteMany({ betAmount, userId });
+        
+        // Update player count for timer
+        const remainingSessions = await GameSession.find({ betAmount });
+        updateBetTimerStats(betAmount, remainingSessions.length);
         
         // Only affect game if it's active
         const gameState = activeGames.get(betAmount);
@@ -438,6 +679,10 @@ export function setupSocket(io: Server) {
         const user = await User.findById(socket.userId);
         await GameSession.findByIdAndDelete(session._id);
 
+        // Update player count for timer
+        const remainingSessions = await GameSession.find({ betAmount });
+        updateBetTimerStats(betAmount, remainingSessions.length);
+
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
@@ -458,26 +703,26 @@ export function setupSocket(io: Server) {
     });
 
     socket.on('update-session-status-by-bet', async ({ betAmount, status }) => {
-  try {
-    // 1. Perform the update only on documents with status 'ready'
-    const updateResult = await GameSession.updateMany(
-      { betAmount, status: 'ready' },
-      { $set: { status: status } } // Use $set operator for clarity
-    );
+      try {
+        // 1. Perform the update only on documents with status 'ready'
+        const updateResult = await GameSession.updateMany(
+          { betAmount, status: 'ready' },
+          { $set: { status: status } } // Use $set operator for clarity
+        );
 
-    // 2. Find only the documents that were just updated (now have the new status)
-    const updatedSessions = await GameSession.find({
-      betAmount,
-      status: status // This finds documents with the NEW status
+        // 2. Find only the documents that were just updated (now have the new status)
+        const updatedSessions = await GameSession.find({
+          betAmount,
+          status: status // This finds documents with the NEW status
+        });
+
+        // 3. Emit the list of updated sessions
+        io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
+      }
     });
-
-    // 3. Emit the list of updated sessions
-    io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-
-  } catch (error: any) {
-    socket.emit('error', { message: error.message || 'Failed to update sessions by bet' });
-  }
-});
 
     socket.on('update-session-status-by-user-bet', async ({ userId, betAmount, status }) => {
       try {
@@ -593,24 +838,24 @@ export function setupSocket(io: Server) {
     });
 
     // Add this inside your io.on('connection') handler in setupSocket.ts
-      socket.on('get-server-time', (callback) => {
-        try {
-          const serverTime = Date.now();
-          const response = {
-            serverTime: serverTime,
-            serverTimeISO: new Date(serverTime).toISOString()
-          };
-          
-          if (typeof callback === 'function') {
-            callback(response);
-          }
-        } catch (error) {
-          console.error('Error getting server time:', error);
-          if (typeof callback === 'function') {
-            callback({ error: 'Failed to get server time' });
-          }
+    socket.on('get-server-time', (callback) => {
+      try {
+        const serverTime = Date.now();
+        const response = {
+          serverTime: serverTime,
+          serverTimeISO: new Date(serverTime).toISOString()
+        };
+        
+        if (typeof callback === 'function') {
+          callback(response);
         }
-      });
+      } catch (error) {
+        console.error('Error getting server time:', error);
+        if (typeof callback === 'function') {
+          callback({ error: 'Failed to get server time' });
+        }
+      }
+    });
 
     socket.on('reset-game', async ({ betAmount }) => {
       try { 
@@ -634,5 +879,5 @@ export function setupSocket(io: Server) {
     socket.on('error', (error) => console.error('Socket error:', error));
   });
 
-  console.log('Socket.io server setup complete');
+  console.log('Socket.io server setup complete with server-side timing control');
 }
