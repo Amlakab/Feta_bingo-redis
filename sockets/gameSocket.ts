@@ -1,5 +1,5 @@
 // =============================
-// File: src/socket/setupSocket.ts (FIXED SERVER-SIDE TIMING)
+// File: src/socket/setupSocket.ts (CORRECTED SERVER-SIDE TIMING)
 // =============================
 import { Server, Socket } from 'socket.io';
 import mongoose from 'mongoose';
@@ -9,7 +9,7 @@ import GameSession, { IGameSession } from '../models/GameSession';
 
 interface AuthenticatedSocket extends Socket { userId?: string; }
 
-// ---- Bingo calling logic ----
+// ---- Bingo Game State ----
 interface GameState {
   betAmount: number;
   calledNumbers: string[];
@@ -26,7 +26,6 @@ interface GameState {
 interface BetTimerState {
   status: 'ready' | 'active' | 'in-progress';
   timer: number;
-  interval?: NodeJS.Timeout;
   playerCount: number;
   prizePool: number;
   createdAt: Date | null;
@@ -34,155 +33,89 @@ interface BetTimerState {
 
 const activeGames = new Map<number, GameState>();
 const betTimers = new Map<number, BetTimerState>();
+let globalTimerInterval: NodeJS.Timeout | null = null;
+
+// Initialize and start the global timer
+function startGlobalTimer(io: Server) {
+  if (globalTimerInterval) {
+    clearInterval(globalTimerInterval);
+  }
+
+  globalTimerInterval = setInterval(() => {
+    let hasChanges = false;
+    
+    betTimers.forEach((timerState, betAmount) => {
+      const newState = { ...timerState };
+      let stateChanged = false;
+
+      if (newState.status === 'ready') {
+        newState.timer -= 1;
+        if (newState.timer <= 0) {
+          newState.status = 'active';
+          newState.timer = 45;
+          newState.createdAt = new Date();
+          console.log(`Timer ${betAmount}: READY → ACTIVE (45s)`);
+        }
+        stateChanged = true;
+      } else if (newState.status === 'active') {
+        newState.timer -= 1;
+        if (newState.timer <= 0) {
+          const gameState = activeGames.get(betAmount);
+          if (gameState && !gameState.isGameEnded) {
+            newState.status = 'in-progress';
+            console.log(`Timer ${betAmount}: ACTIVE → IN-PROGRESS`);
+          } else {
+            newState.status = 'ready';
+            newState.timer = 5;
+            newState.createdAt = null;
+            console.log(`Timer ${betAmount}: ACTIVE → READY (5s)`);
+          }
+        }
+        stateChanged = true;
+      }
+
+      if (stateChanged) {
+        betTimers.set(betAmount, newState);
+        hasChanges = true;
+      }
+    });
+
+    if (hasChanges) {
+      broadcastTimerStates(io);
+    }
+  }, 1000);
+}
 
 // Initialize timers for all bet amounts
 async function initializeBetTimers(io: Server) {
   try {
-    // Import Games model
     const Games = require('../models/Games');
-    const games = await Games.find().sort({ createdAt: -1 });
-    
-    console.log(`Initializing timers for ${games.length} bet amounts:`, games.map((g: any) => g.betAmount));
+    const games = await Games.find();
     
     games.forEach((game: any) => {
-      const initialTimerState: BetTimerState = {
+      betTimers.set(game.betAmount, {
         status: 'ready',
-        timer: 5, // Start with 5s ready period
+        timer: 5,
         playerCount: 0,
         prizePool: 0,
         createdAt: null
-      };
-      
-      betTimers.set(game.betAmount, initialTimerState);
-      
-      // Start the timer for this bet amount
-      startBetTimer(io, game.betAmount);
+      });
     });
     
-    console.log(`Initialized timers for ${games.length} bet amounts`);
-    
-    // Broadcast initial timer states
+    console.log(`Initialized timers for ${games.length} bet amounts:`, Array.from(betTimers.keys()));
+    startGlobalTimer(io);
     broadcastTimerStates(io);
   } catch (error) {
     console.error('Error initializing bet timers:', error);
   }
 }
 
-// Start timer for a specific bet amount
-function startBetTimer(io: Server, betAmount: number) {
-  // Clear existing interval if any
-  const existingTimer = betTimers.get(betAmount);
-  if (existingTimer && existingTimer.interval) {
-    clearInterval(existingTimer.interval);
-  }
-
-  const interval = setInterval(() => {
-    const timerState = betTimers.get(betAmount);
-    if (!timerState) return;
-
-    const newTimerState = { ...timerState };
-    
-    // Update timer based on current status
-    if (newTimerState.status === 'ready') {
-      newTimerState.timer -= 1;
-      
-      if (newTimerState.timer <= 0) {
-        // Transition from ready to active
-        newTimerState.status = 'active';
-        newTimerState.timer = 45; // 45 seconds active period
-        newTimerState.createdAt = new Date();
-        console.log(`Bet ${betAmount} transitioned to ACTIVE phase (45s)`);
-        
-        // Broadcast the state change
-        broadcastTimerStates(io);
-      }
-    } else if (newTimerState.status === 'active') {
-      newTimerState.timer -= 1;
-      
-      if (newTimerState.timer <= 0) {
-        // Check if game is in progress
-        const gameState = activeGames.get(betAmount);
-        if (gameState && !gameState.isGameEnded) {
-          // Game is in progress, don't reset timer
-          newTimerState.status = 'in-progress';
-          console.log(`Bet ${betAmount} is IN-PROGRESS, holding timer`);
-        } else {
-          // No game in progress, reset to ready
-          newTimerState.status = 'ready';
-          newTimerState.timer = 5;
-          newTimerState.createdAt = null;
-          console.log(`Bet ${betAmount} reset to READY phase (5s)`);
-        }
-        
-        // Broadcast the state change
-        broadcastTimerStates(io);
-      }
-    }
-    // For 'in-progress' status, we don't decrement timer
-    
-    betTimers.set(betAmount, newTimerState);
-    
-    // Broadcast updated timer state every second
-    broadcastTimerStates(io);
-    
-  }, 1000);
-
-  // Store the interval in the timer state
-  const currentState = betTimers.get(betAmount);
-  if (currentState) {
-    currentState.interval = interval;
-    betTimers.set(betAmount, currentState);
-  }
-}
-
-// Update player count and prize pool for a bet amount
-function updateBetTimerStats(betAmount: number, playerCount: number) {
-  const timerState = betTimers.get(betAmount);
-  if (timerState) {
-    timerState.playerCount = playerCount;
-    timerState.prizePool = playerCount * betAmount * 0.8;
-    betTimers.set(betAmount, timerState);
-  }
-}
-
-// Set bet timer to in-progress (when game starts)
-function setBetTimerInProgress(io: Server, betAmount: number) {
-  const timerState = betTimers.get(betAmount);
-  if (timerState) {
-    timerState.status = 'in-progress';
-    betTimers.set(betAmount, timerState);
-    console.log(`Bet ${betAmount} timer set to IN-PROGRESS`);
-    
-    // Broadcast the state change
-    broadcastTimerStates(io);
-  }
-}
-
-// Reset bet timer to ready (when game ends)
-function resetBetTimer(io: Server, betAmount: number) {
-  const timerState = betTimers.get(betAmount);
-  if (timerState) {
-    timerState.status = 'ready';
-    timerState.timer = 5;
-    timerState.createdAt = null;
-    betTimers.set(betAmount, timerState);
-    console.log(`Bet ${betAmount} timer reset to READY`);
-    
-    // Broadcast the state change
-    broadcastTimerStates(io);
-  }
-}
-
-// Get current timer state for a bet amount
-function getBetTimerState(betAmount: number) {
-  return betTimers.get(betAmount);
-}
-
 // Broadcast timer states to all clients
 function broadcastTimerStates(io: Server) {
-  const timerStates: {[key: number]: any} = {};
+  const timerStates: {[key: number]: BetTimerState} = {};
+  
   betTimers.forEach((state, betAmount) => {
-    timerStates[betAmount] = { 
+    timerStates[betAmount] = {
       status: state.status,
       timer: state.timer,
       playerCount: state.playerCount,
@@ -191,18 +124,12 @@ function broadcastTimerStates(io: Server) {
     };
   });
   
+  console.log('Broadcasting timer states:', timerStates);
   io.emit('timer-states-update', timerStates);
 }
 
-// Start broadcasting timer states periodically (as backup)
-function startTimerBroadcast(io: Server) {
-  setInterval(() => {
-    broadcastTimerStates(io);
-  }, 1000); // Broadcast every second as backup
-}
-
-// Add timer state for new bet amount dynamically
-function addBetTimer(io: Server, betAmount: number) {
+// Update player count and prize pool
+function updateBetTimerStats(betAmount: number, playerCount: number) {
   if (!betTimers.has(betAmount)) {
     betTimers.set(betAmount, {
       status: 'ready',
@@ -211,12 +138,50 @@ function addBetTimer(io: Server, betAmount: number) {
       prizePool: 0,
       createdAt: null
     });
-    startBetTimer(io, betAmount);
-    console.log(`Added timer for new bet amount: ${betAmount}`);
+  }
+  
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.playerCount = playerCount;
+    timerState.prizePool = playerCount * betAmount * 0.8;
   }
 }
 
-// Existing bingo game functions (keep all your existing functions exactly as they are)
+// Set bet timer to in-progress when game starts
+function setBetTimerInProgress(betAmount: number) {
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.status = 'in-progress';
+    console.log(`Timer ${betAmount} set to IN-PROGRESS`);
+  }
+}
+
+// Reset bet timer when game ends
+function resetBetTimer(betAmount: number) {
+  const timerState = betTimers.get(betAmount);
+  if (timerState) {
+    timerState.status = 'ready';
+    timerState.timer = 5;
+    timerState.createdAt = null;
+    console.log(`Timer ${betAmount} reset to READY`);
+  }
+}
+
+// Add timer for new bet amount dynamically
+function ensureBetTimerExists(betAmount: number) {
+  if (!betTimers.has(betAmount)) {
+    betTimers.set(betAmount, {
+      status: 'ready',
+      timer: 5,
+      playerCount: 0,
+      prizePool: 0,
+      createdAt: null
+    });
+    console.log(`Created new timer for bet amount: ${betAmount}`);
+  }
+}
+
+// Your existing bingo game functions
 function generateAllBingoNumbers(): string[] {
   const letters = ["B","I","N","G","O"];
   const ranges = [
@@ -244,7 +209,8 @@ function shuffleNumbers(numbers: string[]): string[] {
 
 function startGameCalling(io: Server, betAmount: number) {
   // Set timer to in-progress when game starts
-  setBetTimerInProgress(io, betAmount);
+  setBetTimerInProgress(betAmount);
+  broadcastTimerStates(io);
   
   // Clear any existing interval for this bet amount
   if (activeGames.has(betAmount)) {
@@ -276,7 +242,6 @@ function startGameCalling(io: Server, betAmount: number) {
     if (!game || game.remainingNumbers.length === 0 || game.isGameEnded) {
       stopGameCalling(betAmount);
       
-      // NEW: Handle case when all numbers are called but no winner
       if (game && game.remainingNumbers.length === 0 && game.pendingWinners.length === 0) {
         console.log(`All 75 numbers called with no winner for betAmount: ${betAmount}. Cleaning up sessions.`);
         await handleNoWinnerGame(io, betAmount);
@@ -294,11 +259,9 @@ function startGameCalling(io: Server, betAmount: number) {
       calledNumbers: game.calledNumbers 
     });
     
-    // NEW: Also check after calling the last number
     if (game.remainingNumbers.length === 0) {
       stopGameCalling(betAmount);
       
-      // Handle case when all numbers are called but no winner
       if (game.pendingWinners.length === 0) {
         console.log(`All 75 numbers called with no winner for betAmount: ${betAmount}. Cleaning up sessions.`);
         await handleNoWinnerGame(io, betAmount);
@@ -307,20 +270,16 @@ function startGameCalling(io: Server, betAmount: number) {
   }, 5000);
 }
 
-// NEW: Function to handle games where all numbers are called but no winner
 async function handleNoWinnerGame(io: Server, betAmount: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) return;
 
-  // End the game completely
   endGameCompletely(io, betAmount);
   
   try {
-    // Delete all sessions for this bet amount
     await GameSession.deleteMany({ betAmount });
     console.log(`Deleted all sessions for betAmount: ${betAmount} (no winner)`);
     
-    // Broadcast that the game ended with no winners
     io.emit('game-ended', {
       winners: [],
       prizePool: 0,
@@ -330,10 +289,7 @@ async function handleNoWinnerGame(io: Server, betAmount: number) {
       message: 'Game ended - all numbers called with no winner'
     });
     
-    // Emit empty sessions list
     io.emit('sessions-updated', []);
-    
-    // Clear the game state
     activeGames.delete(betAmount);
     console.log(`Game state cleared for betAmount: ${betAmount} (no winner)`);
     
@@ -343,7 +299,6 @@ async function handleNoWinnerGame(io: Server, betAmount: number) {
   }
 }
 
-// FIXED: stopGameCalling only stops number calling, doesn't end game
 function stopGameCalling(betAmount: number) {
   const g = activeGames.get(betAmount);
   if (g) {
@@ -352,11 +307,9 @@ function stopGameCalling(betAmount: number) {
       g.callingInterval = undefined;
     }
     g.isCalling = false;
-    // DON'T set g.isGameEnded = true here - game continues during grace period
   }
 }
 
-// NEW: Function to fully end the game
 function endGameCompletely(io: Server, betAmount: number) {
   const g = activeGames.get(betAmount);
   if (g) {
@@ -367,8 +320,8 @@ function endGameCompletely(io: Server, betAmount: number) {
       g.gracePeriodTimer = undefined;
     }
     
-    // Reset timer when game completely ends
-    resetBetTimer(io, betAmount);
+    resetBetTimer(betAmount);
+    broadcastTimerStates(io);
   }
 }
 
@@ -376,7 +329,6 @@ function getGameState(betAmount: number) {
   return activeGames.get(betAmount); 
 }
 
-// FIXED: handleWinnerSubmission with proper grace period handling
 async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: string, winnerCard: number, prizePool: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
@@ -384,7 +336,6 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // Check if this winner was already submitted
   const isDuplicate = gameState.pendingWinners.some(w => 
     w.userId === winnerId && w.card === winnerCard
   );
@@ -394,37 +345,31 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
     return;
   }
 
-  // FIXED: Stop calling numbers when first winner is found (only if still calling)
   if (gameState.isCalling) {
     console.log(`First winner found! Stopping number calling for betAmount: ${betAmount}`);
     stopGameCalling(betAmount);
     
-    // Activate grace period
     gameState.gracePeriodActive = true;
     
-    // Broadcast game-stop event (numbers stopped, grace period started)
     io.emit('game-stopped', { 
       betAmount, 
       firstWinner: { userId: winnerId, card: winnerCard },
       message: `Player ${winnerCard} wins! 4-second grace period started.`,
-      allWinners: gameState.pendingWinners // Include any existing winners
+      allWinners: gameState.pendingWinners
     });
 
-    // FIXED: Start grace period timer ONLY ONCE for the first winner
     if (!gameState.gracePeriodTimer) {
       console.log(`Starting 4-second grace period timer for betAmount: ${betAmount}`);
       gameState.gracePeriodTimer = setTimeout(async () => {
         console.log(`Grace period ended for betAmount: ${betAmount}, finalizing game...`);
         await finalizeGame(io, betAmount, prizePool);
-      }, 4000); // 4 seconds grace period
+      }, 4000);
     }
   }
 
-  // Add winner to pending list (works for both first and subsequent winners)
   gameState.pendingWinners.push({ userId: winnerId, card: winnerCard });
   console.log(`Winner added: ${winnerId}, card ${winnerCard}. Total winners: ${gameState.pendingWinners.length}`);
 
-  // Broadcast individual winner announcement
   io.emit('winner-announced', {
     betAmount,
     winnerId,
@@ -434,7 +379,6 @@ async function handleWinnerSubmission(io: Server, betAmount: number, winnerId: s
   });
 }
 
-// FIXED: finalizeGame - processes all winners and ends game completely
 async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
   const gameState = activeGames.get(betAmount);
   if (!gameState) {
@@ -442,7 +386,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     return;
   }
 
-  // End game completely
   endGameCompletely(io, betAmount);
   
   const winners = gameState.pendingWinners;
@@ -452,7 +395,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     const sessions = await GameSession.find({ betAmount });
     const numberOfPlayers = sessions.length;
 
-    // Delete all sessions for this bet amount
     await GameSession.deleteMany({ betAmount });
     console.log(`Deleted sessions for betAmount: ${betAmount}`);
 
@@ -460,7 +402,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
     if (winners.length > 0) {
       prizePerWinner = prizePool / winners.length;
 
-      // Update winners' wallets and create game history
       for (const winner of winners) {
         const user = await User.findById(winner.userId);
         if (user) {
@@ -472,7 +413,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
           console.log(`Updated wallet for user: ${winner.userId}, added ${prizePerWinner}`);
         }
 
-        // Create game history record
         await GameHistory.create({
           winnerId: winner.userId,
           winnerCard: winner.card,
@@ -485,7 +425,6 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
 
       console.log(`Broadcasting final results to all clients: ${winners.length} winners`);
       
-      // Broadcast final game-ended event
       io.emit('game-ended', {
         winners: winners,
         prizePool: prizePool,
@@ -504,11 +443,9 @@ async function finalizeGame(io: Server, betAmount: number, prizePool: number) {
       });
     }
 
-    // Clear the game state
     activeGames.delete(betAmount);
     console.log(`Game state cleared for betAmount: ${betAmount}`);
 
-    // Emit empty sessions list
     io.emit('sessions-updated', []);
 
   } catch (error) {
@@ -530,9 +467,8 @@ async function enrichWithUserPhones(sessions: IGameSession[]) {
 }
 
 export function setupSocket(io: Server) {
-  // Initialize bet timers and start broadcasting
+  // Initialize bet timers
   initializeBetTimers(io);
-  startTimerBroadcast(io);
   
   io.use(async (socket: AuthenticatedSocket, next) => {
     try {
@@ -546,16 +482,10 @@ export function setupSocket(io: Server) {
   io.on('connection', (socket: AuthenticatedSocket) => {
     console.log('Client connected:', socket.id, 'User:', socket.userId);
 
-    // Send current timer states to newly connected client immediately
-    const initialTimerStates: {[key: number]: any} = {};
+    // Send current timer states immediately to newly connected client
+    const initialTimerStates: {[key: number]: BetTimerState} = {};
     betTimers.forEach((state, betAmount) => {
-      initialTimerStates[betAmount] = { 
-        status: state.status,
-        timer: state.timer,
-        playerCount: state.playerCount,
-        prizePool: state.prizePool,
-        createdAt: state.createdAt
-      };
+      initialTimerStates[betAmount] = { ...state };
     });
     socket.emit('timer-states-update', initialTimerStates);
 
@@ -578,6 +508,9 @@ export function setupSocket(io: Server) {
           updateBetTimerStats(session.betAmount, playerCount);
         });
         
+        // Broadcast updated timer states
+        broadcastTimerStates(io);
+        
         socket.emit('sessions-updated', enriched);
       } catch (error: any) {
         socket.emit('error', { message: error.message || 'Failed to get sessions' });
@@ -596,7 +529,7 @@ export function setupSocket(io: Server) {
         if (existing) return socket.emit('error', { message: 'Card already taken' });
 
         // Ensure timer exists for this bet amount
-        addBetTimer(io, betAmount);
+        ensureBetTimerExists(betAmount);
 
         const created = await GameSession.create({
           userId: new mongoose.Types.ObjectId(userId),
@@ -610,6 +543,9 @@ export function setupSocket(io: Server) {
         // Update player count for timer
         const playerCount = allSessions.filter(s => s.betAmount === betAmount).length;
         updateBetTimerStats(betAmount, playerCount);
+
+        // Broadcast updated timer states
+        broadcastTimerStates(io);
 
         io.emit('session-created', populatedCreated);
         io.emit('sessions-updated', enrichedAll);
@@ -646,6 +582,9 @@ export function setupSocket(io: Server) {
           endGameCompletely(io, betAmount);
         }
 
+        // Broadcast updated timer states
+        broadcastTimerStates(io);
+
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
         const updatedSessions = await GameSession.find({ status: { $in: ['active','ready'] } });
@@ -679,6 +618,9 @@ export function setupSocket(io: Server) {
           stopGameCalling(betAmount);
           endGameCompletely(io, betAmount);
         }
+
+        // Broadcast updated timer states
+        broadcastTimerStates(io);
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
@@ -727,6 +669,9 @@ export function setupSocket(io: Server) {
         const remainingSessions = await GameSession.find({ betAmount });
         updateBetTimerStats(betAmount, remainingSessions.length);
 
+        // Broadcast updated timer states
+        broadcastTimerStates(io);
+
         const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
         io.emit('sessions-updated', await enrichWithUserPhones(updated));
@@ -748,19 +693,16 @@ export function setupSocket(io: Server) {
 
     socket.on('update-session-status-by-bet', async ({ betAmount, status }) => {
       try {
-        // 1. Perform the update only on documents with status 'ready'
         const updateResult = await GameSession.updateMany(
           { betAmount, status: 'ready' },
-          { $set: { status: status } } // Use $set operator for clarity
+          { $set: { status: status } }
         );
 
-        // 2. Find only the documents that were just updated (now have the new status)
         const updatedSessions = await GameSession.find({
           betAmount,
-          status: status // This finds documents with the NEW status
+          status: status
         });
 
-        // 3. Emit the list of updated sessions
         io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
 
       } catch (error: any) {
@@ -838,13 +780,11 @@ export function setupSocket(io: Server) {
           return socket.emit('error', { message: 'No active game found' });
         }
 
-        // FIXED: Allow submissions during grace period (when isCalling is false but game is not ended)
         if (gameState.isGameEnded) {
           console.log(`Game already fully ended for betAmount: ${betAmount}`);
           return socket.emit('error', { message: 'Game has already ended' });
         }
 
-        // Handle the winner submission
         await handleWinnerSubmission(io, betAmount, winnerId, winnerCard, prizePool);
         
       } catch (error: any) { 
@@ -856,15 +796,9 @@ export function setupSocket(io: Server) {
     // === Get timer states ===
     socket.on('get-timer-states', () => {
       try {
-        const timerStates: {[key: number]: any} = {};
+        const timerStates: {[key: number]: BetTimerState} = {};
         betTimers.forEach((state, betAmount) => {
-          timerStates[betAmount] = { 
-            status: state.status,
-            timer: state.timer,
-            playerCount: state.playerCount,
-            prizePool: state.prizePool,
-            createdAt: state.createdAt
-          };
+          timerStates[betAmount] = { ...state };
         });
         socket.emit('timer-states-update', timerStates);
       } catch (error: any) {
@@ -875,19 +809,16 @@ export function setupSocket(io: Server) {
     // Add this endpoint in the io.on('connection') section, after the other endpoints
     socket.on('get-remaining-time', async ({ betAmount }) => {
       try {
-        // Find the earliest active session for this bet amount
         const earliestSession = await GameSession.findOne({
           betAmount,
           status: { $in: ['active', 'ready'] }
         }).sort({ createdAt: 1 });
 
         if (!earliestSession) {
-          // No active sessions, return initial time (45 seconds)
           socket.emit('remaining-time', { betAmount, remainingTime: 45 });
           return;
         }
 
-        // Calculate remaining time based on the earliest session
         const sessionStartTime = new Date(earliestSession.createdAt).getTime();
         const currentTime = new Date().getTime();
         const elapsedSeconds = Math.floor((currentTime - sessionStartTime) / 1000);
