@@ -664,48 +664,43 @@ export function setupSocket(io: Server) {
 
     // === Clear selected ===
     socket.on('clear-selected', async ({ betAmount, userId }) => {
-    try {
-      if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
+      try {
+        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
 
-      // ONLY delete sessions for this specific user AND bet amount
-      const deleteResult = await GameSession.deleteMany({
-        betAmount: betAmount, // Critical: scope to current bet amount
-        userId: userId,
-        status: { $in: ['active', 'ready'] }
-      });
+        const sessions = await GameSession.find({ 
+          betAmount, 
+          userId, 
+          status: { $in: ['active', 'ready'] } 
+        });
 
-      console.log(`Cleared ${deleteResult.deletedCount} sessions for user ${userId}, bet ${betAmount}`);
+        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
 
-      // Update user wallet
-      const user = await User.findById(userId);
-      if (user) {
-        // Optional: Refund based on cleared sessions
-        const refundAmount = betAmount * deleteResult.deletedCount;
-        (user as any).wallet += refundAmount;
-        await user.save();
+        const user = await User.findById(userId);
+
+        // const deleteResult = await GameSession.deleteMany({
+        //   betAmount,
+        //   userId,
+        //   status: 'active'
+        // });
+
+        // ✅ FIXED: Use centralized cleanup function
+        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
+        
+        // Only stop game if this user was participating
+        // const gameState = activeGames.get(betAmount);
+        // if (gameState) {
+        //   stopGameCalling(betAmount);
+        //   endGameCompletely(io, betAmount);
+        // }
+
+        const updated = await GameSession.find({ status: { $in: ['ready','active','playing'] } });
+        socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+        io.emit('sessions-updated', await enrichWithUserPhones(updated));
+        
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to clear selected' });
       }
-
-      // Get updated sessions FOR THIS BET AMOUNT ONLY
-      const updatedSessions = await GameSession.find({ 
-        betAmount: betAmount, // Only sessions for this bet amount
-        status: { $in: ['active','ready','playing'] } 
-      });
-      
-      const enrichedSessions = await enrichWithUserPhones(updatedSessions);
-      
-      // Update timer stats for THIS BET AMOUNT
-      await updateBetTimerStats(betAmount, io);
-      
-      // Emit wallet update to user
-      socket.emit('wallet-updated', user ? (user as any).wallet : 0);
-      
-      // Broadcast session updates for THIS BET AMOUNT
-      io.emit('sessions-updated', enrichedSessions);
-      
-    } catch (error: any) {
-      socket.emit('error', { message: error.message || 'Failed to clear selected' });
-    }
-  });
+    });
 
     // === Refund Wallet ===
     socket.on('refund-wallet', async ({ betAmount, userId }) => {
