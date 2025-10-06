@@ -677,15 +677,21 @@ export function setupSocket(io: Server) {
 
         const user = await User.findById(userId);
 
+        const deleteResult = await GameSession.deleteMany({
+          betAmount,
+          userId,
+          status: 'active'
+        });
+
         // ✅ FIXED: Use centralized cleanup function
-        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
+        //await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
         
         // Only stop game if this user was participating
-        // const gameState = activeGames.get(betAmount);
-        // if (gameState) {
-        //   stopGameCalling(betAmount);
-        //   endGameCompletely(io, betAmount);
-        // }
+        const gameState = activeGames.get(betAmount);
+        if (gameState) {
+          stopGameCalling(betAmount);
+          endGameCompletely(io, betAmount);
+        }
 
         socket.emit('wallet-updated', user ? (user as any).wallet : 0);
 
