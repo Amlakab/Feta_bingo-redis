@@ -35,7 +35,7 @@ const userSchema = new Schema<IUser>({
   },
   wallet: {
     type: Number,
-    default: 5,
+    default: 20,
     min: 0,
   },
   dailyEarnings: {
