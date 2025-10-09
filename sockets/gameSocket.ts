@@ -734,6 +734,29 @@ export function setupSocket(io: Server) {
       }
     });
 
+        // === Fund Wallet ===
+    socket.on('fund-wallet', async ({ betAmount, userId }) => {
+      try {
+        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
+
+        const sessions = await GameSession.find({ betAmount, userId, status: 'active' });
+        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
+
+        const totalAmount = betAmount * sessions.length;
+        const user = await User.findById(userId);
+        if (!user) return socket.emit('error', { message: 'User not found' });
+
+        if ((user as any).wallet < totalAmount) return socket.emit('error', { message: 'Insufficient balance' });
+
+        (user as any).wallet -= totalAmount;
+        await user.save();
+
+        socket.emit('wallet-updated', (user as any).wallet);
+      } catch (error: any) {
+        socket.emit('error', { message: error.message || 'Failed to fund wallet' });
+      }
+    });
+
     // === Delete session ===
     socket.on('delete-session', async ({ cardNumber, betAmount }) => {
       try {
