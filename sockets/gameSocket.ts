@@ -703,36 +703,54 @@ export function setupSocket(io: Server) {
     });
 
     // === Refund Wallet ===
-    socket.on('refund-wallet', async ({ betAmount, userId }) => {
-      try {
-        if (!userId || socket.userId !== userId) return socket.emit('error', { message: 'Unauthorized' });
+   socket.on('refund-wallet', async ({ betAmount, userId }) => {
+  try {
+    if (!userId || socket.userId !== userId) {
+      return socket.emit('error', { message: 'Unauthorized' });
+    }
 
-        const sessions = await GameSession.find({ betAmount, userId, status: 'ready' });
-        if (!sessions.length) return socket.emit('error', { message: 'No sessions found' });
-
-        const totalRefund = betAmount * sessions.length;
-        const user = await User.findById(userId);
-        if (user) { (user as any).wallet += totalRefund; await user.save(); }
-
-        // ✅ FIXED: Use centralized cleanup function
-        await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
-        
-        // Only affect game if it's active
-        const gameState = activeGames.get(betAmount);
-        if (gameState && !gameState.isGameEnded) {
-          stopGameCalling(betAmount);
-          endGameCompletely(io, betAmount);
-        }
-
-        socket.emit('wallet-updated', user ? (user as any).wallet : 0);
-
-        const updatedSessions = await GameSession.find({ status: { $in: ['active','playing','ready'] } });
-        io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
-        
-      } catch (error: any) {
-        socket.emit('error', { message: error.message || 'Failed to refund wallet' });
-      }
+    // ✅ Include both 'ready' and 'playing' sessions
+    const sessions = await GameSession.find({ 
+      betAmount, 
+      userId, 
+      status: { $in: ['ready', 'playing'] } 
     });
+
+    if (!sessions.length) {
+      return socket.emit('error', { message: 'No sessions found' });
+    }
+
+    const totalRefund = betAmount * sessions.length;
+    const user = await User.findById(userId);
+
+    if (user) {
+      (user as any).wallet += totalRefund;
+      await user.save();
+    }
+
+    // ✅ Use centralized cleanup
+    await cleanupSessionsAndUpdateStats(io, betAmount, { betAmount, userId });
+
+    // ✅ End game only if it's active
+    const gameState = activeGames.get(betAmount);
+    if (gameState && !gameState.isGameEnded) {
+      stopGameCalling(betAmount);
+      endGameCompletely(io, betAmount);
+    }
+
+    socket.emit('wallet-updated', user ? (user as any).wallet : 0);
+
+    const updatedSessions = await GameSession.find({ 
+      status: { $in: ['active', 'playing', 'ready'] } 
+    });
+
+    io.emit('sessions-updated', await enrichWithUserPhones(updatedSessions));
+
+  } catch (error: any) {
+    socket.emit('error', { message: error.message || 'Failed to refund wallet' });
+  }
+});
+
 
         // === Fund Wallet ===
     socket.on('fund-wallet', async ({ betAmount, userId }) => {
