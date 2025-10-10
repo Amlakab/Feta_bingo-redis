@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import User, { IUser } from '../models/User';
-
+import Transaction from '../models/Transaction';
+import GameHistory from '../models/GameHistory';
+import SpinnerHistory from '../models/SpinnerHistory';
 // Helper functions
 const successResponse = (res: Response, data: any, message: string = 'Success', statusCode: number = 200) => {
   res.status(statusCode).json({
@@ -126,22 +129,79 @@ export const updateUserStatus = async (req: Request, res: Response) => {
   }
 };
 
-// Delete user
+// Delete user with all related data
 export const deleteUser = async (req: Request, res: Response) => {
+  const session = await mongoose.startSession();
+  
   try {
     const { userId } = req.params;
 
-    const user = await User.findByIdAndDelete(userId);
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return errorResponse(res, 'Invalid user ID', 400);
+    }
 
+    console.log(`Starting deletion process for user: ${userId}`);
+
+    // Find the user first to check their role
+    const user = await User.findById(userId).session(session);
+    
     if (!user) {
       return errorResponse(res, 'User not found', 404);
     }
 
-    successResponse(res, null, 'User deleted successfully');
+    session.startTransaction();
+
+    // Delete all transactions related to the user
+    const transactionResult = await Transaction.deleteMany({ 
+      userId: user._id 
+    }).session(session);
+    console.log(`Deleted ${transactionResult.deletedCount} transactions for user ${userId}`);
+
+    let gameHistoryResult: any = null;
+    let spinnerHistoryResult: any = null;
+
+    // Delete game history based on user role
+    if (user.role === 'spinner-user') {
+      // Delete from SpinnerHistory for spinner users
+      spinnerHistoryResult = await SpinnerHistory.deleteMany({ 
+        winnerId: user._id 
+      }).session(session);
+      console.log(`Deleted ${spinnerHistoryResult.deletedCount} spinner history records for user ${userId}`);
+    } else {
+      // Delete from GameHistory for regular users, disk-users, agents, admins
+      gameHistoryResult = await GameHistory.deleteMany({ 
+        winnerId: user._id 
+      }).session(session);
+      console.log(`Deleted ${gameHistoryResult.deletedCount} game history records for user ${userId}`);
+    }
+
+    // Delete the user
+    await User.findByIdAndDelete(user._id).session(session);
+    console.log(`User ${userId} deleted successfully`);
+
+    // Commit the transaction
+    await session.commitTransaction();
+    
+    // Prepare response data
+    const deletionSummary = {
+      transactionsDeleted: transactionResult.deletedCount,
+      gameHistoryDeleted: gameHistoryResult?.deletedCount || 0,
+      spinnerHistoryDeleted: spinnerHistoryResult?.deletedCount || 0,
+      userRole: user.role
+    };
+
+    successResponse(res, deletionSummary, 'User and all related data deleted successfully');
+    
   } catch (error: any) {
-    errorResponse(res, error.message, 500);
+    // If anything fails, abort the transaction
+    await session.abortTransaction();
+    console.error('Error deleting user and related data:', error);
+    errorResponse(res, `Failed to delete user: ${error.message}`, 500);
+  } finally {
+    session.endSession();
   }
 };
+
 
 // Get user statistics
 export const getUserStatistics = async (req: Request, res: Response) => {
